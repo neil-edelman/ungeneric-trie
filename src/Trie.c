@@ -312,7 +312,7 @@ static TrieLeaf trie_match(const struct Trie *const t, const char *const key) {
 	TrieBranch branch;
 	unsigned n0_byte, str_byte = 0, bit;
 	assert(t && key);
-	if(n1 <= 1) return n1 ? t->leaves.data[0] : 0; /* Special case. */
+	if(!n1) return 0; /* Special case: empty has no matches. */
 	n1--, assert(n1 == t->branches.size);
 	while(n0 < n1) {
 		branch = t->branches.data[n0];
@@ -327,6 +327,10 @@ static TrieLeaf trie_match(const struct Trie *const t, const char *const key) {
 	return t->leaves.data[i];
 }
 
+/** In `t`, given a partial `key`, spits back the [`low`, `high`] prefix
+ matches. @return Whether `low` and `high` have been written to. As in
+ PATRICiA, don't care bits are silently ignored, so the only reason this would
+ not return true is it's an empty trie. @order \O(`key.length`) */
 static int trie_match_all(const struct Trie *const t, const char *const key,
 	size_t *const low, size_t *const high) {
 	size_t n0 = 0, n1 = t->leaves.size, i = 0, left;
@@ -336,17 +340,18 @@ static int trie_match_all(const struct Trie *const t, const char *const key,
 	if(!n1) return 0;
 	n1--, assert(n1 == t->branches.size);
 	while(n0 < n1) {
-		printf("n [%lu, %lu] i %lu\n", n0, n1, i);
 		branch = t->branches.data[n0];
 		bit = trie_bit(branch);
 		left = trie_left(branch);
-		for(n0_byte = bit >> 3; str_byte < n0_byte; str_byte++)
+		/* _Sic_; `\0` is _not_ included for partial match. */
+		for(n0_byte = bit >> 3; str_byte <= n0_byte; str_byte++)
 			if(key[str_byte] == '\0') goto finally;
 		if(!trie_is_bit(key, bit)) n1 = ++n0 + left;
 		else n0 += left + 1, i += left + 1;
 	}
-	assert(n0 == n1 && i < t->leaves.size);
+	assert(n0 == n1);
 finally:
+	assert(i < t->leaves.size);
 	return *low = i, *high = i - n0 + n1, 1;
 }
 
@@ -420,8 +425,8 @@ static void trie_print(const struct Trie *const t) {
 	printf("}.\n");
 }
 
-/** Given `n` in `t` branches, caluculate the right child branches.
- @order \O(log `size`) */
+/** Given `n` in `t` branches, caluculate the right child branches. Used in
+ <fn:trie_graph>. @order \O(log `size`) */
 static size_t trie_right(const struct Trie *const t, const size_t n) {
 	size_t remaining = t->branches.size, n0 = 0, left, right;
 	assert(t && n < remaining);
@@ -438,7 +443,7 @@ static size_t trie_right(const struct Trie *const t, const size_t n) {
 }
 
 /** @return Given `n` in `t` branches, follows the internal nodes left until
- it hits a branch. */
+ it hits a branch. Used in <fn:trie_graph>. */
 static size_t trie_left_leaf(const struct Trie *const t, const size_t n) {
 	size_t remaining = t->branches.size, n0 = 0, left, right, i = 0;
 	assert(t && n < remaining);
@@ -495,6 +500,9 @@ static void trie_graph(const struct Trie *const t, const char *const fn) {
 
 int main(void) {
 	static const char *words[] = {
+#if 0
+		"foo", "bar", "baz", "qux", "quxx"
+#else
 "wryer","posturists","nonanswers","collations","renovating","view","kiddingly",
 "lineman","elating","convocate","tonically","steradians","disdained",
 "hypervigilance","annexational","scabiosas","pinfishes","disinhibited",
@@ -560,25 +568,26 @@ int main(void) {
 "skrieghs","smouldry","crower","pellicles","sapucaias","underuses","reexplored",
 "chlamydia","tragediennes","levator","accipiter","esquisses","intentnesses",
 "julienning","tetched","creeshing","anaphrodisiacs","insecurities","tarpons",
-"lipotropins","sinkage","slooshes","homoplastic","feateous" };
+"lipotropins","sinkage","slooshes","homoplastic","feateous"
+#endif
+	};
 	const size_t words_size = sizeof words / sizeof *words;
 	size_t start, end, i;
 	struct Trie t;
 	TrieLeaf leaf;
-	const TrieLeaf s = "slithern";
+	const TrieLeaf word = "slithern", prefix = "x";
 	int success = EXIT_FAILURE;
 
 	if(!trie_init(&t, words, words_size, 0)) goto catch;
 	trie_print(&t);
-	trie_graph(&t, "trie-words.gv");
-	leaf = trie_match(&t, s);
-	printf("leaf: %s --> %s\n", s, leaf);
-	if(trie_match_all(&t, "a", &start, &end)) {
-		printf("[%lu, %lu]\n", start, end);
-		for(i = start; i <= end; i++)
-			printf("%s, ", t.leaves.data[i]);
-		printf("\n");
-	}
+	trie_graph(&t, "graph/trie-words.gv");
+	leaf = trie_match(&t, word);
+	printf("match: %s --> %s\n", word, leaf);
+	trie_match_all(&t, prefix, &start, &end);
+	printf("match prefix: %s --> { ", prefix);
+	for(i = start; i <= end; i++)
+		printf("%s%s", i == start ? "" : ", ", t.leaves.data[i]);
+	printf(" }.\n");
 	trie_(&t);
 
 	success = EXIT_SUCCESS;
