@@ -234,7 +234,7 @@ static void trie_init_branches_r(struct Trie *const t, unsigned bit,
  @param[merge] Called with any duplicate entries and replaces if true; if
  null, doesn't replace.
  @return Success initialising `t` with `a` of size `a_size`, (non-zero.) */
-static int trie_init(struct Trie *const t, TrieLeaf *const a,
+static int trie_init(struct Trie *const t, const TrieLeaf *const a,
 	const size_t a_size, const TrieBipredicate merge) {
 	TrieLeaf *leaves;
 	assert(t && a && a_size);
@@ -503,10 +503,7 @@ static void trie_graph(const struct Trie *const t, const char *const fn) {
 }
 
 int main(void) {
-	static const char *words[] = {
-#if 0
-		"foo", "bar", "baz", "qux", "quxx"
-#else
+	const char *const words[] = {
 "wryer","posturists","nonanswers","collations","renovating","view","kiddingly",
 "lineman","elating","convocate","tonically","steradians","disdained",
 "hypervigilance","annexational","scabiosas","pinfishes","disinhibited",
@@ -556,29 +553,35 @@ int main(void) {
 "frowzier","allegiance","encalmed","fattens","plasmin","literalized",
 "insupportable","approbations","lenity","coexerts","fascinators","medullae",
 "taborers","phylloxera","wadings","apostatize","fippences","anecdotes",
-"speechifies","impassible","superstrike","unrifled","quinoidal","preformatted",
-"gigawatt","triodes","lophophores","gargarising","hydrological","undeifying",
-"distinctness","cravening","phagocytosing","baetyl","hakes","abstractedly",
-"unnilquadiums","mynas","inexpertness","rhabdoms","rabatments","maimers",
-"kitties","procaryotes","labroids","antiobscenities","stanchels","enjoiner",
-"notoriety","pumicating","stupendousness","fecklessly","boraces",
-"technologizing","cycloliths","penduline","tepefied","infernally","subdorsal",
-"confectionary","slenderize","unearthed","camorrista","outpressing","unworldly",
-"polysyndetons","aguizing","semantra","neutralization","hypopharynges",
-"multiwall","parenchymal","monoecies","bodyshells","asperse","cotyledons",
-"subclaim","transudates","glamourless","sphygmographs","traversal",
+"speechifies","impassible","superstrike","unrifled","runbacks","shampoos",
+"quinoidal","preformatted","honchos","gigawatt","triodes","lophophores",
+"gargarising","hydrological","undeifying","distinctness","cravening",
+"phagocytosing","leopardesses","careless","baetyl","showmanship","lankiness",
+"racketers","engrossed","hakes","treatment","abstractedly","wirinesses",
+"unnilquadiums","greasier","mynas","inexpertness","mooner","digesting",
+"rhabdoms","actioners","lauans","semanteme","trapesings","rabatments","maimers",
+"heathier","amebean","gainer","diktat","redsear","spoilages","kitties",
+"procaryotes","labroids","antiobscenities","stanchels","enjoiner","notoriety",
+"pumicating","stupendousness","fidgeters","fecklessly","cawk","boraces",
+"technologizing","cycloliths","biffy","penduline","tepefied","infernally",
+"subdorsal","confectionary","slenderize","unearthed","camorrista","outpressing",
+"unworldly","frankpledges","leveeing","polysyndetons","aguizing","semantra",
+"neutralization","hypopharynges","multiwall","spellbinder","parenchymal",
+"waiving","happily","anklebones","obligees","monoecies","blindage","bodyshells",
+"asperse","cotyledons","forekings","fico","subclaim","chorus","homesteaders",
+"prometals","transudates","glamourless","sphygmographs","traversal",
 "thimbleriggers","shaken","undefaced","jeopardy","enheartening","dentural",
 "fluorides","loganias","gladsomeness","locule","oestrones","militantnesses",
 "skrieghs","smouldry","crower","pellicles","sapucaias","underuses","reexplored",
 "chlamydia","tragediennes","levator","accipiter","esquisses","intentnesses",
 "julienning","tetched","creeshing","anaphrodisiacs","insecurities","tarpons",
 "lipotropins","sinkage","slooshes","homoplastic","feateous"
-#endif
-	};
-	const size_t words_size = sizeof words / sizeof *words;
+	}, *const extra[] = { "foo", "bar", "baz", "qux", "quxx" };
+	const size_t words_size = sizeof words / sizeof *words,
+		extra_size = sizeof extra / sizeof *extra;
 	size_t start, end, i;
 	struct Trie t;
-	TrieLeaf leaf;
+	TrieLeaf leaf, eject;
 	const TrieLeaf word = "slithern", prefix = "pe";
 	int success = EXIT_FAILURE;
 	if(!trie_init(&t, words, words_size, 0)) goto catch;
@@ -591,6 +594,11 @@ int main(void) {
 	for(i = start; i <= end; i++)
 		printf("%s%s", i == start ? "" : ", ", t.leaves.data[i]);
 	printf(" }.\n");
+	assert(t.leaves.size == words_size);
+	for(i = 0; i < extra_size; i++)
+		if(!trie_put(&t, extra[i], &eject, 0)) goto catch;
+	trie_graph(&t, "graph/trie-words-extra.gv");
+	assert(t.leaves.size == words_size + extra_size);
 	success = EXIT_SUCCESS;
 	goto finally;
 catch:
