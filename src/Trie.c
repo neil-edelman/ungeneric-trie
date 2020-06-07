@@ -253,7 +253,7 @@ static int trie_init(struct Trie *const t, TrieLeaf *const a,
 
 /** Add `datum` to `t`. Must not be the same as any key of trie; _ie_ it
  does not check for the end of the string. @return Success. @order \O(|`t`|)
- @throws[ERANGE] At capacity or string too long. @throws[realloc] */
+ @throws[ERANGE] At capacity or string too long.? @throws[realloc] */
 static int trie_add(struct Trie *const t, TrieLeaf datum) {
 	const size_t leaf_size = t->leaves.size, branch_size = leaf_size - 1;
 	size_t n0 = 0, n1 = branch_size, i = 0, left;
@@ -272,7 +272,7 @@ static int trie_add(struct Trie *const t, TrieLeaf datum) {
 
 	/* Non-empty; verify conservative maximally unbalanced trie. */
 	assert(leaf_size == branch_size + 1); /* Waste `size_t`. */
-	if(leaf_size >= TRIE_LEFT_MAX) return errno = ERANGE, 0;
+	if(leaf_size >= TRIE_LEFT_MAX) return errno = ERANGE, 0; /* EILSEQ */
 	if(!leaf_reserve(&t->leaves, leaf_size + 1)
 		|| !branch_reserve(&t->branches, branch_size + 1)) return 0;
 
