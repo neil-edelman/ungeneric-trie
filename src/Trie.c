@@ -250,9 +250,8 @@ static int trie_init(struct Trie *const t, TrieLeaf *const a,
 }
 
 /** Add `datum` to `t`. Must not be the same as any key of trie; _ie_ it
- does not check for the end of the string. @return Success.
- @order \Theta(`nodes`) @throws[ERANGE] At capacity or string too long.
- @throws[realloc] */
+ does not check for the end of the string. @return Success. @order \O(|`t`|)
+ @throws[ERANGE] At capacity or string too long. @throws[realloc] */
 static int trie_add(struct Trie *const t, TrieLeaf datum) {
 	const size_t leaf_size = t->leaves.size, branch_size = leaf_size - 1;
 	size_t n0 = 0, n1 = branch_size, i = 0, left;
@@ -305,8 +304,10 @@ insert:
 	return 1;
 }
 
-/** @return `t` leaf that potentially matches `key` or null if it definitely
- is not in `t`. */
+/** Don't care bits of `key` are not tested, those that aren't involved in
+ making a decision, and are not stored in the trie. @return `t` leaf that
+ potentially matches `key` or null if it definitely is not in `t`.
+ @order \O(`key.length`) */
 static TrieLeaf trie_match(const struct Trie *const t, const char *const key) {
 	size_t n0 = 0, n1 = t->leaves.size, i = 0, left;
 	TrieBranch branch;
@@ -327,32 +328,29 @@ static TrieLeaf trie_match(const struct Trie *const t, const char *const key) {
 	return t->leaves.data[i];
 }
 
-/** In `t`, given a partial `key`, spits back the [`low`, `high`] prefix
- matches. @return Whether `low` and `high` have been written to. As in
- PATRICiA, don't care bits are silently ignored, so the only reason this would
- not return true is it's an empty trie. @order \O(`key.length`) */
-static int trie_match_all(const struct Trie *const t, const char *const key,
-	size_t *const low, size_t *const high) {
+/** In `t` that must be non-empty, given a partial `key`, stores the leaf
+ [`low`, `high`] descision bits prefix matches. @order \O(`key.length`) */
+static void trie_match_prefix(const struct Trie *const t,
+	const char *const key, size_t *const low, size_t *const high) {
 	size_t n0 = 0, n1 = t->leaves.size, i = 0, left;
 	TrieBranch branch;
 	unsigned n0_byte, str_byte = 0, bit;
-	assert(t && key && low && high);
-	if(!n1) return 0;
+	assert(t && key && low && high && n1);
 	n1--, assert(n1 == t->branches.size);
 	while(n0 < n1) {
 		branch = t->branches.data[n0];
 		bit = trie_bit(branch);
-		left = trie_left(branch);
 		/* _Sic_; `\0` is _not_ included for partial match. */
 		for(n0_byte = bit >> 3; str_byte <= n0_byte; str_byte++)
 			if(key[str_byte] == '\0') goto finally;
+		left = trie_left(branch);
 		if(!trie_is_bit(key, bit)) n1 = ++n0 + left;
 		else n0 += left + 1, i += left + 1;
 	}
 	assert(n0 == n1);
 finally:
-	assert(i < t->leaves.size);
-	return *low = i, *high = i - n0 + n1, 1;
+	assert(n0 <= n1 && i - n0 + n1 < t->leaves.size);
+	*low = i, *high = i - n0 + n1;
 }
 
 /** @return `key` is an element of `t` that is an exact match or null. */
@@ -410,7 +408,7 @@ static void trie_remove(struct Trie *const t, size_t i) {
 	memmove(branch, branch + 1, sizeof n0 * (--t->branches.size - last_n0));
 }
 
-/** Prints `t`. */
+/** Prints `t` on `stdout`. */
 static void trie_print(const struct Trie *const t) {
 	size_t i, n;
 	printf("Trie: ");
@@ -575,21 +573,18 @@ int main(void) {
 	size_t start, end, i;
 	struct Trie t;
 	TrieLeaf leaf;
-	const TrieLeaf word = "slithern", prefix = "x";
+	const TrieLeaf word = "slithern", prefix = "pe";
 	int success = EXIT_FAILURE;
-
 	if(!trie_init(&t, words, words_size, 0)) goto catch;
 	trie_print(&t);
 	trie_graph(&t, "graph/trie-words.gv");
 	leaf = trie_match(&t, word);
 	printf("match: %s --> %s\n", word, leaf);
-	trie_match_all(&t, prefix, &start, &end);
+	trie_match_prefix(&t, prefix, &start, &end);
 	printf("match prefix: %s --> { ", prefix);
 	for(i = start; i <= end; i++)
 		printf("%s%s", i == start ? "" : ", ", t.leaves.data[i]);
 	printf(" }.\n");
-	trie_(&t);
-
 	success = EXIT_SUCCESS;
 	goto finally;
 catch:
