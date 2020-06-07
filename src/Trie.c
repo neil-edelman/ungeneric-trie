@@ -256,36 +256,31 @@ static int trie_init(struct Trie *const t, const TrieLeaf *const a,
  @throws[ERANGE] At capacity or string too long.? @throws[realloc] */
 static int trie_add(struct Trie *const t, TrieLeaf datum) {
 	const size_t leaf_size = t->leaves.size, branch_size = leaf_size - 1;
-	size_t n0 = 0, n1 = branch_size, i = 0, left;
+	size_t n0 = 0, n1 = branch_size, n_parent, i = 0, left;
 	TrieBranch *branch;
 	const char *n0_key;
-	unsigned bit = 0, n0_bit;
+	unsigned bit = 0, skip;
 	TrieLeaf *leaf;
-	int cmp; /* fixme: has not changed with skip bits. */
+	int cmp;
 
-	/* Verify string length and empty short circuit. */
+	/* Empty special case. */
 	assert(t && datum);
-	if(strlen(datum) > (TRIE_SKIP_MAX >> 3) - 1/* null */)
-		return errno = ERANGE, 0;
 	if(!leaf_size) return assert(!t->branches.size),
 		(leaf = leaf_new(&t->leaves)) ? *leaf = datum, 1 : 0;
-
-	/* Non-empty; verify conservative maximally unbalanced trie. */
-	assert(leaf_size == branch_size + 1); /* Waste `size_t`. */
-	if(leaf_size >= TRIE_LEFT_MAX) return errno = ERANGE, 0; /* EILSEQ */
+	/* Reserve more from non-empty.
+	 Waste `size_t`, but maybe more complex VLQ like Judy? */
+	assert(leaf_size == branch_size + 1);
+	if(leaf_size > TRIE_LEFT_MAX) return errno = ERANGE, 0; /* Conservative. */
 	if(!leaf_reserve(&t->leaves, leaf_size + 1)
 		|| !branch_reserve(&t->branches, branch_size + 1)) return 0;
-
 	/* Internal nodes. */
 	while(branch = t->branches.data + n0, n0_key = t->leaves.data[i], n0 < n1) {
-		assert(0);
-		/*for(n0_bit = trie_bit(*branch); bit < n0_bit; bit++)
-			if((cmp = trie_strcmp_bit(datum, n0_key, bit)) != 0) goto insert;*/
-		left = trie_left(*branch) + 1;
+		for(skip = bit + trie_skip(*branch); bit < skip; bit++)
+			if((cmp = trie_strcmp_bit(datum, n0_key, bit)) != 0) goto insert;
+		left = trie_left(*branch) + 1; /* Leaves. */
 		if(!trie_is_bit(datum, bit)) trie_left_inc(branch), n1 = n0++ + left;
 		else n0 += left, i += left;
 	}
-
 	/* Leaf. */
 	while((cmp = trie_strcmp_bit(datum, n0_key, bit)) == 0) bit++;
 
@@ -293,15 +288,15 @@ insert:
 	assert(n0 <= n1 && n1 <= t->branches.size && n0_key && i <= t->leaves.size);
 	if(cmp < 0) left = 0;
 	else left = n1 - n0, i += left + 1;
-
+	/* Insert leaf. */
 	leaf = t->leaves.data + i;
 	memmove(leaf + 1, leaf, sizeof *leaf * (leaf_size - i));
 	*leaf = datum;
 	t->leaves.size++;
-
+	/* Insert branch. */
 	branch = t->branches.data + n0;
 	memmove(branch + 1, branch, sizeof *branch * (branch_size - n0));
-	*branch = trie_branch(bit, left);
+	*branch = trie_branch(bit, left); /* Fixme: split. */
 	t->branches.size++;
 
 	return 1;
@@ -344,7 +339,7 @@ static void trie_prefix(const struct Trie *const t, const char *const key,
 	while(n0 < n1) {
 		branch = t->branches.data[n0];
 		bit += trie_skip(branch);
-		/* _Sic_; `\0` is _not_ included for partial match. */
+		/* _Sic_; '\0' is _not_ included for partial match. */
 		for(n0_byte = bit >> 3; str_byte <= n0_byte; str_byte++)
 			if(key[str_byte] == '\0') goto finally;
 		left = trie_left(branch);
@@ -413,6 +408,10 @@ static int trie_put(struct Trie *const t, TrieLeaf datum,
 	}
 	return 1;
 }
+
+
+/* Testing. */
+
 
 /** Prints `t` on `stdout`. */
 static void trie_print(const struct Trie *const t) {
