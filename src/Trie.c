@@ -162,9 +162,11 @@ static unsigned trie_skip(const TrieBranch branch)
 /** @return Unpacks left sub-branches from `branch`. */
 static size_t trie_left(const TrieBranch branch) { return branch >> TRIE_SKIP; }
 
-/** Decrements `branch` `bit`. */
-static void trie_skip_dec(size_t *const branch, unsigned bit) {
-	assert(branch && trie_skip(*branch) >= bit), *branch -= bit;
+/** Overwrites `branch` `skip`. */
+static void trie_skip_set(size_t *const branch, unsigned skip) {
+	assert(branch && skip <= TRIE_SKIP_MAX);
+	*branch &= ~TRIE_SKIP_MAX;
+	*branch += skip;
 }
 
 /** Increments the left `branch` count. */
@@ -212,7 +214,7 @@ static void trie_(struct Trie *const t) {
 
 /** Recursive function used for <fn:trie_init>. Initialise branches of `t`
  up to `bit` with `a` to `a_size` array of sorted leaves.
- @order Speed \O(`leaves`), memory \O(`longest string`). */
+ @order Speed \O(`leaves`)?, memory \O(`longest string`). */
 static void trie_init_branches_r(struct Trie *const t, unsigned bit,
 	const size_t a, const size_t a_size) {
 	size_t b = a, b_size = a_size, half;
@@ -307,11 +309,16 @@ insert:
 	memmove(leaf + 1, leaf, sizeof *leaf * (leaf_size - i));
 	*leaf = datum;
 	t->leaves.size++;
-	/* Insert branch; split the skip value. */
+	/* Insert branch. */
 	branch = t->branches.data + n0;
-	if(n0 != n1) trie_skip_dec(branch, bit - bit0 + 1);
+	if(n0 != n1) { /* Branched from an internal node, split the skip value. */
+		const unsigned skip = trie_skip(*branch);
+		printf("%s: splitting %u -> %u, %u\n", datum, skip, skip - bit + bit0 - !bit0, bit - bit0 + !bit0 - 1);
+		assert(skip + bit0 + 1 >= bit);
+		trie_skip_set(branch, skip - bit + bit0 - !bit0);
+	}
 	memmove(branch + 1, branch, sizeof *branch * (branch_size - n0));
-	*branch = trie_branch(bit - bit0, left);
+	*branch = trie_branch(bit - bit0 + !bit0 - 1, left);
 	t->branches.size++;
 	return 1;
 }
