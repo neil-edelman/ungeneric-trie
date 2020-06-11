@@ -332,7 +332,7 @@ insert:
  `key` are not tested and may not be an exact match. @return `t` leaf that
  potentially matches `key` or null if it definitely is not in `t`.
  @order \O(`key.length`) */
-static TrieLeaf trie_match(const struct Trie *const t, const char *const key) {
+static TrieLeaf index_match(const struct Trie *const t, const char *const key) {
 	size_t n0 = 0, n1 = t->leaves.size, i = 0, left;
 	TrieBranch branch;
 	unsigned n0_byte, str_byte = 0, bit = 0; /* `bit` should be size_t */
@@ -354,15 +354,15 @@ static TrieLeaf trie_match(const struct Trie *const t, const char *const key) {
 }
 
 /** @return `key` is an element of `t` that is an exact match or null. */
-static TrieLeaf trie_get(const struct Trie *const t, const char *const key) {
+static TrieLeaf trie_match(const struct Trie *const t, const char *const key) {
 	TrieLeaf match;
 	assert(t && key);
-	return (match = trie_match(t, key)) && !strcmp(match, key) ? match : 0;
+	return (match = index_match(t, key)) && !strcmp(match, key) ? match : 0;
 }
 
 /** In `t` that must be non-empty, given a partial `key`, stores the leaf
  [`low`, `high`] decision bits prefix matches. @order \O(`key.length`) */
-static void trie_prefix(const struct Trie *const t, const char *const prefix,
+static void index_prefix(const struct Trie *const t, const char *const prefix,
 	size_t *const low, size_t *const high) {
 	size_t n0 = 0, n1 = t->leaves.size, i = 0, left;
 	TrieBranch branch;
@@ -393,10 +393,10 @@ static int is_prefix(const char *a, const char *b) {
 	return 1;
 }
 
-static int trie_all(const struct Trie *const t, const char *const prefix,
+static int trie_prefix(const struct Trie *const t, const char *const prefix,
 	size_t *const low, size_t *const high) {
 	assert(t && prefix && low && high);
-	trie_prefix(t, prefix, low, high);
+	index_prefix(t, prefix, low, high);
 	return is_prefix(prefix, t->leaves.data[*low]);
 }
 
@@ -435,7 +435,7 @@ static int trie_put(struct Trie *const t, TrieLeaf datum,
 	TrieLeaf match;
 	assert(t && datum);
 	/* Add. */
-	if(!(match = trie_get(t, datum))) {
+	if(!(match = trie_match(t, datum))) {
 		if(eject) *eject = 0;
 		return trie_add(t, datum);
 	}
@@ -630,33 +630,33 @@ int main(void) {
 	trie_print(&t);
 	trie_graph(&t, "graph/trie-all-at-once.gv");
 
+	leaf = index_match(&t, word_in);
+	printf("index match: %s --> %s\n", word_in, leaf);
+	leaf = index_match(&t, word_out);
+	printf("index match: %s --> %s\n", word_out, leaf);
+
 	leaf = trie_match(&t, word_in);
 	printf("match: %s --> %s\n", word_in, leaf);
 	leaf = trie_match(&t, word_out);
 	printf("match: %s --> %s\n", word_out, leaf);
 
-	leaf = trie_get(&t, word_in);
-	printf("get: %s --> %s\n", word_in, leaf);
-	leaf = trie_get(&t, word_out);
-	printf("get: %s --> %s\n", word_out, leaf);
+	index_prefix(&t, prefix_in, &start, &end);
+	printf("index prefix: %s --> { ", prefix_in);
+	for(i = start; i <= end; i++)
+		printf("%s%s", i == start ? "" : ", ", t.leaves.data[i]);
+	printf(" }.\n");
+	index_prefix(&t, prefix_out, &start, &end);
+	printf("index prefix: %s --> { ", prefix_out);
+	for(i = start; i <= end; i++)
+		printf("%s%s", i == start ? "" : ", ", t.leaves.data[i]);
+	printf(" }.\n");
 
-	trie_prefix(&t, prefix_in, &start, &end);
 	printf("prefix: %s --> { ", prefix_in);
-	for(i = start; i <= end; i++)
+	if(trie_prefix(&t, prefix_in, &start, &end)) for(i = start; i <= end; i++)
 		printf("%s%s", i == start ? "" : ", ", t.leaves.data[i]);
 	printf(" }.\n");
-	trie_prefix(&t, prefix_out, &start, &end);
 	printf("prefix: %s --> { ", prefix_out);
-	for(i = start; i <= end; i++)
-		printf("%s%s", i == start ? "" : ", ", t.leaves.data[i]);
-	printf(" }.\n");
-
-	printf("all: %s --> { ", prefix_in);
-	if(trie_all(&t, prefix_in, &start, &end)) for(i = start; i <= end; i++)
-		printf("%s%s", i == start ? "" : ", ", t.leaves.data[i]);
-	printf(" }.\n");
-	printf("all: %s --> { ", prefix_out);
-	if(trie_all(&t, prefix_out, &start, &end)) for(i = start; i <= end; i++)
+	if(trie_prefix(&t, prefix_out, &start, &end)) for(i = start; i <= end; i++)
 		printf("%s%s", i == start ? "" : ", ", t.leaves.data[i]);
 	printf(" }.\n");
 
@@ -672,12 +672,12 @@ int main(void) {
 	/*trie_graph(&t, "graph/trie-words-extra.gv");*/
 	assert(t.leaves.size == words_size + extra_size);/**/
 	for(i = 0; i < words_size; i++) {
-		leaf = trie_get(&t, words[i]);
+		leaf = trie_match(&t, words[i]);
 		printf("found %s\n", leaf ? leaf : "nothing");
 		assert(leaf && leaf == words[i]);
 	}
 	for(i = 0; i < extra_size; i++) {
-		leaf = trie_get(&t, extra[i]);
+		leaf = trie_match(&t, extra[i]);
 		printf("found %s\n", leaf ? leaf : "nothing");
 		assert(leaf && leaf == extra[i]);
 	}
