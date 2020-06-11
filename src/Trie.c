@@ -294,9 +294,8 @@ static int trie_add(struct Trie *const t, TrieLeaf datum) {
 			if((cmp = trie_strcmp_bit(datum, n0_key, bit)) != 0) goto insert;
 		bit0 = bit1;
 		left = trie_left(*branch) + 1; /* Leaves. */
-		if(!trie_is_bit(datum, bit)) trie_left_inc(branch), n1 = n0++ + left;
+		if(!trie_is_bit(datum, bit++)) trie_left_inc(branch), n1 = n0++ + left;
 		else n0 += left, i += left;
-		bit++;
 	}
 	/* Leaf when `n0 == n1`. */
 	while((cmp = trie_strcmp_bit(datum, n0_key, bit)) == 0) bit++;
@@ -604,8 +603,8 @@ int main(void) {
 	TrieLeaf leaf, eject;
 	const TrieLeaf word = "slithern", prefix = "pe";
 	int success = EXIT_FAILURE;
-	/*if(!trie_init(&t, words, words_size, 0)) goto catch;*/
-	if(!trie_init(&t, extra, extra_size, 0)) goto catch;
+	if(!trie_init(&t, words, words_size, 0)) goto catch;
+	/*if(!trie_init(&t, extra, extra_size, 0)) goto catch;*/
 	trie_print(&t);
 	trie_graph(&t, "graph/trie-all-at-once.gv");
 	leaf = trie_match(&t, word);
@@ -615,8 +614,8 @@ int main(void) {
 	for(i = start; i <= end; i++)
 		printf("%s%s", i == start ? "" : ", ", t.leaves.data[i]);
 	printf(" }.\n");
-	/*assert(t.leaves.size == words_size);*/
-	/* Fixme: */ trie_(&t);
+	/**/assert(t.leaves.size == words_size);/**/
+	/* Fixme: *//* trie_(&t); */
 	for(i = 0; i < extra_size; i++) {
 		char fn[64];
 		if(!trie_put(&t, extra[i], &eject, 0)) goto catch;
@@ -624,8 +623,18 @@ int main(void) {
 		trie_graph(&t, fn);
 		printf("out: %s\n", fn);
 	}
-	/*trie_graph(&t, "graph/trie-words-extra.gv");
-	assert(t.leaves.size == words_size + extra_size);*/
+	/*trie_graph(&t, "graph/trie-words-extra.gv");*/
+	assert(t.leaves.size == words_size + extra_size);/**/
+	for(i = 0; i < words_size; i++) {
+		leaf = trie_get(&t, words[i]);
+		printf("found %s\n", leaf ? leaf : "nothing");
+		assert(leaf && leaf == words[i]);
+	}
+	for(i = 0; i < extra_size; i++) {
+		leaf = trie_get(&t, extra[i]);
+		printf("found %s\n", leaf ? leaf : "nothing");
+		assert(leaf && leaf == extra[i]);
+	}
 	success = EXIT_SUCCESS;
 	goto finally;
 catch:
