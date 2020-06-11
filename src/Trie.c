@@ -269,8 +269,8 @@ static int trie_init(struct Trie *const t, const TrieLeaf *const a,
 
 /** Add `datum` to `t`. Must not be the same as any key of trie; _ie_ it
  does not check for the end of the string. @return Success. @order \O(|`t`|)
- @throws[ERANGE] At capacity or string too long.? @throws[realloc] */
-static int trie_add(struct Trie *const t, TrieLeaf datum) {
+ @throws[ERANGE] fixme: at capacity or string too long. @throws[realloc] */
+static int index_add(struct Trie *const t, TrieLeaf datum) {
 	const size_t leaf_size = t->leaves.size, branch_size = leaf_size - 1;
 	size_t n0 = 0, n1 = branch_size, i = 0, left;
 	TrieBranch *branch = 0;
@@ -328,15 +328,15 @@ insert:
 	return 1;
 }
 
-/** Looks at only the index and not the data; as a result, don't care bits of
- `key` are not tested and may not be an exact match. @return `t` leaf that
- potentially matches `key` or null if it definitely is not in `t`.
- @order \O(`key.length`) */
-static TrieLeaf index_match(const struct Trie *const t, const char *const key) {
+/** This is useful if you want the maximum amount of information. Looks at only
+ the index of `t` for potential matches of `key`. Stores in `result` if
+ succeeded. @return Success. @order \O(`key.length`) */
+static int awkward_get(const struct Trie *const t, const char *const key,
+	size_t *const result) {
 	size_t n0 = 0, n1 = t->leaves.size, i = 0, left;
 	TrieBranch branch;
 	unsigned n0_byte, str_byte = 0, bit = 0; /* `bit` should be size_t */
-	assert(t && key);
+	assert(t && key && result);
 	if(!n1) return 0; /* Special case: empty has no matches. */
 	n1--, assert(n1 == t->branches.size);
 	while(n0 < n1) {
@@ -350,14 +350,28 @@ static TrieLeaf index_match(const struct Trie *const t, const char *const key) {
 		bit++;
 	}
 	assert(n0 == n1 && i < t->leaves.size);
-	return t->leaves.data[i];
+	*result = i;
+	return 1;
+}
+
+/** Looks only at the index of `t` for potential matches of `key`.
+ @return Result, or null if `key` is not able to fully differentiate the
+ strings in `t`. */
+static TrieLeaf index_get(const struct Trie *const t, const char *const key) {
+	size_t i;
+	return awkward_get(t, key, &i) ? t->leaves.data[i] : 0;
+}
+
+/** Combines lookup of `t`, `key`, `result`, with compare. @return Success. */
+static int awkward_exact_get(const struct Trie *const t,
+	const char *const key, size_t *const result) {
+	return awkward_get(t, key, result) && !strcmp(t->leaves.data[*result], key);
 }
 
 /** @return `key` is an element of `t` that is an exact match or null. */
-static TrieLeaf trie_match(const struct Trie *const t, const char *const key) {
-	TrieLeaf match;
-	assert(t && key);
-	return (match = index_match(t, key)) && !strcmp(match, key) ? match : 0;
+static TrieLeaf exact_get(const struct Trie *const t, const char *const key) {
+	size_t i;
+	return awkward_exact_get(t, key, &i) ? t->leaves.data[i] : 0;
 }
 
 /** In `t` that must be non-empty, given a partial `key`, stores the leaf
@@ -393,27 +407,30 @@ static int is_prefix(const char *a, const char *b) {
 	return 1;
 }
 
-static int trie_prefix(const struct Trie *const t, const char *const prefix,
+/** Combines prefix of `t`, `prefix`, `low`, `high`, with compare.
+ @return Success. */
+static int exact_prefix(const struct Trie *const t, const char *const prefix,
 	size_t *const low, size_t *const high) {
 	assert(t && prefix && low && high);
 	index_prefix(t, prefix, low, high);
 	return is_prefix(prefix, t->leaves.data[*low]);
 }
 
-/** Remove leaf index `i` from `t`. */
-static void trie_remove(struct Trie *const t, size_t i) {
+/** Remove leaf index `i` from `t`.
+ @fixme Combine sibling's and parent's skips. This is a problem because it
+ could overflow and prevent deletion. */
+static int index_remove(struct Trie *const t, size_t i) {
 	size_t n0 = 0, n1 = t->branches.size, last_n0, left;
 	size_t *branch;
 	assert(t && i < t->leaves.size && t->branches.size + 1 == t->leaves.size);
-	/* fixme: make sure that we could combine siblings' and parents' skips. */
 	/* Remove leaf. */
-	if(!--t->leaves.size) return; /* Special case of one leaf. */
+	if(!--t->leaves.size) return 1; /* Special case of one leaf. */
 	memmove(t->leaves.data + i, t->leaves.data + i + 1,
 		sizeof t->leaves.data * (n1 - i));
 	/* Remove branch. */
 	for( ; ; ) {
 		left = trie_left(*(branch = t->branches.data + (last_n0 = n0)));
-		if(i <= left) {
+		if(i <= left) { /* Binary search, decrementing the left count. */
 			if(!left) break;
 			n1 = ++n0 + left;
 			trie_left_dec(branch);
@@ -422,22 +439,38 @@ static void trie_remove(struct Trie *const t, size_t i) {
 			i -= left;
 		}
 	}
+	/* If it has a child, merge this branch with the child. */
+	if(n0 < n1) {
+		const unsigned skip = trie_skip(branch[0]),
+			child_skip = trie_skip(branch[1]);
+		/* fixme: There is nothing to guarantee this; re-arrange. */
+		assert(child_skip < TRIE_LEFT_MAX - skip);
+		trie_skip_set(branch + 1, child_skip + 1 + skip);
+	}
 	memmove(branch, branch + 1, sizeof n0 * (--t->branches.size - last_n0));
+	return 1;
+}
+
+/** Removes `key` from `t`.
+ @return Whether `key` was found in `t` and was removed. */
+static int exact_remove(struct Trie *const t, const char *const key) {
+	size_t i;
+	assert(t && key);
+	return awkward_exact_get(t, key, &i) && index_remove(t, i);
 }
 
 /** Adds `data` to `t` and, if `eject` is non-null, stores the collided
  element, if any, as long as `replace` is null or returns true.
  @param[eject] If not-null, the ejected datum. If `replace` returns false, then
- `*eject == datum`.
- @return Success. @throws[realloc, ERANGE] */
+ `*eject == datum`. @return Success. @throws[realloc, ERANGE] */
 static int trie_put(struct Trie *const t, TrieLeaf datum,
 	TrieLeaf *const eject, const TrieBipredicate replace) {
 	TrieLeaf match;
 	assert(t && datum);
-	/* Add. */
-	if(!(match = trie_match(t, datum))) {
+	/* Add if absent. */
+	if(!(match = exact_get(t, datum))) {
 		if(eject) *eject = 0;
-		return trie_add(t, datum);
+		return index_add(t, datum);
 	}
 	/* Collision policy. */
 	if(replace && !replace(match, datum)) {
@@ -630,15 +663,15 @@ int main(void) {
 	trie_print(&t);
 	trie_graph(&t, "graph/trie-all-at-once.gv");
 
-	leaf = index_match(&t, word_in);
-	printf("index match: %s --> %s\n", word_in, leaf);
-	leaf = index_match(&t, word_out);
-	printf("index match: %s --> %s\n", word_out, leaf);
+	leaf = index_get(&t, word_in);
+	printf("index get: %s --> %s\n", word_in, leaf);
+	leaf = index_get(&t, word_out);
+	printf("index get: %s --> %s\n", word_out, leaf);
 
-	leaf = trie_match(&t, word_in);
-	printf("match: %s --> %s\n", word_in, leaf);
-	leaf = trie_match(&t, word_out);
-	printf("match: %s --> %s\n", word_out, leaf);
+	leaf = exact_get(&t, word_in);
+	printf("exact get: %s --> %s\n", word_in, leaf);
+	leaf = exact_get(&t, word_out);
+	printf("exact get: %s --> %s\n", word_out, leaf);
 
 	index_prefix(&t, prefix_in, &start, &end);
 	printf("index prefix: %s --> { ", prefix_in);
@@ -651,12 +684,12 @@ int main(void) {
 		printf("%s%s", i == start ? "" : ", ", t.leaves.data[i]);
 	printf(" }.\n");
 
-	printf("prefix: %s --> { ", prefix_in);
-	if(trie_prefix(&t, prefix_in, &start, &end)) for(i = start; i <= end; i++)
+	printf("exact prefix: %s --> { ", prefix_in);
+	if(exact_prefix(&t, prefix_in, &start, &end)) for(i = start; i <= end; i++)
 		printf("%s%s", i == start ? "" : ", ", t.leaves.data[i]);
 	printf(" }.\n");
-	printf("prefix: %s --> { ", prefix_out);
-	if(trie_prefix(&t, prefix_out, &start, &end)) for(i = start; i <= end; i++)
+	printf("exact prefix: %s --> { ", prefix_out);
+	if(exact_prefix(&t, prefix_out, &start, &end)) for(i = start; i <= end; i++)
 		printf("%s%s", i == start ? "" : ", ", t.leaves.data[i]);
 	printf(" }.\n");
 
@@ -669,18 +702,35 @@ int main(void) {
 		trie_graph(&t, fn);
 		printf("out: %s\n", fn);
 	}
-	/*trie_graph(&t, "graph/trie-words-extra.gv");*/
-	assert(t.leaves.size == words_size + extra_size);/**/
+	/**/assert(t.leaves.size == words_size + extra_size);/**/
 	for(i = 0; i < words_size; i++) {
-		leaf = trie_match(&t, words[i]);
+		leaf = exact_get(&t, words[i]);
 		printf("found %s\n", leaf ? leaf : "nothing");
 		assert(leaf && leaf == words[i]);
 	}
 	for(i = 0; i < extra_size; i++) {
-		leaf = trie_match(&t, extra[i]);
+		leaf = exact_get(&t, extra[i]);
 		printf("found %s\n", leaf ? leaf : "nothing");
 		assert(leaf && leaf == extra[i]);
 	}
+
+	for(i = 0; i < extra_size; i++) {
+		const int is = exact_remove(&t, extra[i]);
+		assert(is);
+	}
+	trie_graph(&t, "graph/trie-removed.gv");
+	/**/assert(t.leaves.size == words_size);/**/
+	for(i = 0; i < words_size; i++) {
+		leaf = exact_get(&t, words[i]);
+		printf("delete found %s\n", leaf ? leaf : "nothing");
+		assert(leaf && leaf == words[i]);
+	}
+	for(i = 0; i < extra_size; i++) {
+		leaf = exact_get(&t, extra[i]);
+		printf("delete found %s\n", leaf ? leaf : "nothing");
+		assert(!leaf);
+	}
+
 	success = EXIT_SUCCESS;
 	goto finally;
 catch:
