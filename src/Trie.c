@@ -276,8 +276,8 @@ static int trie_add(struct Trie *const t, TrieLeaf datum) {
 	unsigned bit0 = 0, bit1, bit = 0;
 	TrieLeaf *leaf;
 	int cmp;
-	int is_internal = 1, is_root;
-	/* Empty special case where we can not traverse the trie. */
+	int is_internal, is_root;
+	/* Empty special case. */
 	assert(t && datum);
 	if(!leaf_size) return assert(!t->branches.size),
 		(leaf = leaf_new(&t->leaves)) ? *leaf = datum, 1 : 0;
@@ -289,7 +289,7 @@ static int trie_add(struct Trie *const t, TrieLeaf datum) {
 	if(leaf_size >= TRIE_LEFT_MAX) return errno = ERANGE, 0;
 	if(!leaf_reserve(&t->leaves, leaf_size + 1)
 		|| !branch_reserve(&t->branches, branch_size + 1)) return 0;
-	/* Internal nodes. */
+	/* Branch from internal nodes. */
 	while(branch = t->branches.data + n0, n0_key = t->leaves.data[i], n0 < n1) {
 		for(bit1 = bit + trie_skip(*branch); bit < bit1; bit++)
 			if((cmp = trie_strcmp_bit(datum, n0_key, bit)) != 0) goto insert;
@@ -298,29 +298,30 @@ static int trie_add(struct Trie *const t, TrieLeaf datum) {
 		if(!trie_is_bit(datum, bit++)) trie_left_inc(branch), n1 = n0++ + left;
 		else n0 += left, i += left;
 	}
-	is_internal = 0;
+	/* Branch from leaf. */
 	while((cmp = trie_strcmp_bit(datum, n0_key, bit)) == 0) bit++;
 insert:
 	assert(n0 <= n1 && n1 <= t->branches.size && n0_key && i <= t->leaves.size
 		&& !n0 == !bit0);
+	/* How many left entries are there to move. */
 	if(cmp < 0) left = 0;
 	else left = n1 - n0, i += left + 1;
+	/* Purely for understanding what is going on. */
+	is_internal = (n0 != n1);
 	is_root = !n0;
-	/* Insert leaf. */
-	leaf = t->leaves.data + i;
-	memmove(leaf + 1, leaf, sizeof *leaf * (leaf_size - i));
-	*leaf = datum;
-	t->leaves.size++;
-	/* Insert branch. */
+	/* Insert one branch, (it's a full binary tree.) */
 	branch = t->branches.data + n0;
-	if(is_internal) { /* Split the skip value. */
+	if(is_internal) { /* Split the skip value with the existing branch. */
 		const unsigned branch_skip = trie_skip(*branch);
 		assert(branch_skip + bit0 >= bit + is_root);
 		trie_skip_set(branch, branch_skip + bit0 - bit - is_root);
 	}
 	memmove(branch + 1, branch, sizeof *branch * (branch_size - n0));
-	*branch = trie_branch(bit - bit0 - !is_root, left);
-	t->branches.size++;
+	*branch = trie_branch(bit - bit0 - !is_root, left), t->branches.size++;
+	/* Insert leaf. */
+	leaf = t->leaves.data + i;
+	memmove(leaf + 1, leaf, sizeof *leaf * (leaf_size - i));
+	*leaf = datum, t->leaves.size++;
 	return 1;
 }
 
