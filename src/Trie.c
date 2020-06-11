@@ -276,6 +276,7 @@ static int trie_add(struct Trie *const t, TrieLeaf datum) {
 	unsigned bit0 = 0, bit1, bit = 0;
 	TrieLeaf *leaf;
 	int cmp;
+	int is_internal = 1, is_root;
 	/* Empty special case where we can not traverse the trie. */
 	assert(t && datum);
 	if(!leaf_size) return assert(!t->branches.size),
@@ -297,12 +298,14 @@ static int trie_add(struct Trie *const t, TrieLeaf datum) {
 		if(!trie_is_bit(datum, bit++)) trie_left_inc(branch), n1 = n0++ + left;
 		else n0 += left, i += left;
 	}
-	/* Leaf when `n0 == n1`. */
+	is_internal = 0;
 	while((cmp = trie_strcmp_bit(datum, n0_key, bit)) == 0) bit++;
 insert:
-	assert(n0 <= n1 && n1 <= t->branches.size && n0_key && i <= t->leaves.size);
+	assert(n0 <= n1 && n1 <= t->branches.size && n0_key && i <= t->leaves.size
+		&& !n0 == !bit0);
 	if(cmp < 0) left = 0;
 	else left = n1 - n0, i += left + 1;
+	is_root = !n0;
 	/* Insert leaf. */
 	leaf = t->leaves.data + i;
 	memmove(leaf + 1, leaf, sizeof *leaf * (leaf_size - i));
@@ -310,14 +313,13 @@ insert:
 	t->leaves.size++;
 	/* Insert branch. */
 	branch = t->branches.data + n0;
-	if(n0 != n1) { /* Branched from an internal node, split the skip value. */
-		const unsigned skip = trie_skip(*branch);
-		printf("%s: splitting %u -> %u, %u\n", datum, skip, skip - bit + bit0 - !bit0, bit - bit0 + !bit0 - 1);
-		assert(skip + bit0 + 1 >= bit);
-		trie_skip_set(branch, skip - bit + bit0 - !bit0);
+	if(is_internal) { /* Split the skip value. */
+		const unsigned branch_skip = trie_skip(*branch);
+		assert(branch_skip + bit0 >= bit + is_root);
+		trie_skip_set(branch, branch_skip + bit0 - bit - is_root);
 	}
 	memmove(branch + 1, branch, sizeof *branch * (branch_size - n0));
-	*branch = trie_branch(bit - bit0 + !bit0 - 1, left);
+	*branch = trie_branch(bit - bit0 - !is_root, left);
 	t->branches.size++;
 	return 1;
 }
