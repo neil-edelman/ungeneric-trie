@@ -1,3 +1,5 @@
+/** @title Prefix Tree */
+
 #include <stdlib.h> /* EXIT malloc free qsort */
 #include <stdio.h>  /* printf */
 #include <string.h> /* memmove memcpy */
@@ -241,7 +243,7 @@ static void trie_init_branches_r(struct Trie *const t, unsigned bit,
 }
 
 /** Initialises `t` to `array`.
- @param[t] An idle or uninitalised trie.
+ @param[t] An idle or uninitialised trie.
  @param[a_size] The size of the array, cannot be zero.
  @param[merge] Called with any duplicate entries and replaces if true; if
  null, doesn't replace.
@@ -291,6 +293,7 @@ static int trie_add(struct Trie *const t, TrieLeaf datum) {
 		|| !branch_reserve(&t->branches, branch_size + 1)) return 0;
 	/* Branch from internal nodes. */
 	while(branch = t->branches.data + n0, n0_key = t->leaves.data[i], n0 < n1) {
+		/* fixme: Detect overflow 12 bits between. */
 		for(bit1 = bit + trie_skip(*branch); bit < bit1; bit++)
 			if((cmp = trie_strcmp_bit(datum, n0_key, bit)) != 0) goto insert;
 		bit0 = bit1;
@@ -325,8 +328,8 @@ insert:
 	return 1;
 }
 
-/** Don't care bits of `key` are not tested, those that aren't involved in
- making a decision, and are not stored in the trie. @return `t` leaf that
+/** Looks at only the index and not the data; as a result, don't care bits of
+ `key` are not tested and may not be an exact match. @return `t` leaf that
  potentially matches `key` or null if it definitely is not in `t`.
  @order \O(`key.length`) */
 static TrieLeaf trie_match(const struct Trie *const t, const char *const key) {
@@ -350,23 +353,30 @@ static TrieLeaf trie_match(const struct Trie *const t, const char *const key) {
 	return t->leaves.data[i];
 }
 
+/** @return `key` is an element of `t` that is an exact match or null. */
+static TrieLeaf trie_get(const struct Trie *const t, const char *const key) {
+	TrieLeaf match;
+	assert(t && key);
+	return (match = trie_match(t, key)) && !strcmp(match, key) ? match : 0;
+}
+
 /** In `t` that must be non-empty, given a partial `key`, stores the leaf
- [`low`, `high`] descision bits prefix matches. @order \O(`key.length`) */
-static void trie_prefix(const struct Trie *const t, const char *const key,
+ [`low`, `high`] decision bits prefix matches. @order \O(`key.length`) */
+static void trie_prefix(const struct Trie *const t, const char *const prefix,
 	size_t *const low, size_t *const high) {
 	size_t n0 = 0, n1 = t->leaves.size, i = 0, left;
 	TrieBranch branch;
 	unsigned n0_byte, str_byte = 0, bit = 0;
-	assert(t && key && low && high && n1);
+	assert(t && prefix && low && high && n1);
 	n1--, assert(n1 == t->branches.size);
 	while(n0 < n1) {
 		branch = t->branches.data[n0];
 		bit += trie_skip(branch);
 		/* _Sic_; '\0' is _not_ included for partial match. */
 		for(n0_byte = bit >> 3; str_byte <= n0_byte; str_byte++)
-			if(key[str_byte] == '\0') goto finally;
+			if(prefix[str_byte] == '\0') goto finally;
 		left = trie_left(branch);
-		if(!trie_is_bit(key, bit)) n1 = ++n0 + left;
+		if(!trie_is_bit(prefix, bit)) n1 = ++n0 + left;
 		else n0 += left + 1, i += left + 1;
 		bit++;
 	}
@@ -374,6 +384,20 @@ static void trie_prefix(const struct Trie *const t, const char *const key,
 finally:
 	assert(n0 <= n1 && i - n0 + n1 < t->leaves.size);
 	*low = i, *high = i - n0 + n1;
+}
+
+/** @return Whether `a` and `b` are equal to the shortest length. */
+static int is_prefix(const char *a, const char *b) {
+	while(*a != '\0' && *b != '\0')
+		{ if(*a != *b) return 0; a++, b++; }
+	return 1;
+}
+
+static int trie_all(const struct Trie *const t, const char *const prefix,
+	size_t *const low, size_t *const high) {
+	assert(t && prefix && low && high);
+	trie_prefix(t, prefix, low, high);
+	return is_prefix(prefix, t->leaves.data[*low]);
 }
 
 /** Remove leaf index `i` from `t`. */
@@ -399,13 +423,6 @@ static void trie_remove(struct Trie *const t, size_t i) {
 		}
 	}
 	memmove(branch, branch + 1, sizeof n0 * (--t->branches.size - last_n0));
-}
-
-/** @return `key` is an element of `t` that is an exact match or null. */
-static TrieLeaf trie_get(const struct Trie *const t, const char *const key) {
-	TrieLeaf match;
-	assert(t && key);
-	return (match = trie_match(t, key)) && !strcmp(match, key) ? match : 0;
 }
 
 /** Adds `data` to `t` and, if `eject` is non-null, stores the collided
@@ -604,19 +621,45 @@ int main(void) {
 	size_t start, end, i;
 	struct Trie t;
 	TrieLeaf leaf, eject;
-	const TrieLeaf word = "slithern", prefix = "pe";
+	const TrieLeaf word_in = "lambda", word_out = "slithern",
+		prefix_in = "pe", prefix_out = "qz";
 	int success = EXIT_FAILURE;
 	if(!trie_init(&t, words, words_size, 0)) goto catch;
 	/*if(!trie_init(&t, extra, extra_size, 0)) goto catch;*/
+
 	trie_print(&t);
 	trie_graph(&t, "graph/trie-all-at-once.gv");
-	leaf = trie_match(&t, word);
-	printf("match: %s --> %s\n", word, leaf);
-	trie_prefix(&t, prefix, &start, &end);
-	printf("match prefix: %s --> { ", prefix);
+
+	leaf = trie_match(&t, word_in);
+	printf("match: %s --> %s\n", word_in, leaf);
+	leaf = trie_match(&t, word_out);
+	printf("match: %s --> %s\n", word_out, leaf);
+
+	leaf = trie_get(&t, word_in);
+	printf("get: %s --> %s\n", word_in, leaf);
+	leaf = trie_get(&t, word_out);
+	printf("get: %s --> %s\n", word_out, leaf);
+
+	trie_prefix(&t, prefix_in, &start, &end);
+	printf("prefix: %s --> { ", prefix_in);
 	for(i = start; i <= end; i++)
 		printf("%s%s", i == start ? "" : ", ", t.leaves.data[i]);
 	printf(" }.\n");
+	trie_prefix(&t, prefix_out, &start, &end);
+	printf("prefix: %s --> { ", prefix_out);
+	for(i = start; i <= end; i++)
+		printf("%s%s", i == start ? "" : ", ", t.leaves.data[i]);
+	printf(" }.\n");
+
+	printf("all: %s --> { ", prefix_in);
+	if(trie_all(&t, prefix_in, &start, &end)) for(i = start; i <= end; i++)
+		printf("%s%s", i == start ? "" : ", ", t.leaves.data[i]);
+	printf(" }.\n");
+	printf("all: %s --> { ", prefix_out);
+	if(trie_all(&t, prefix_out, &start, &end)) for(i = start; i <= end; i++)
+		printf("%s%s", i == start ? "" : ", ", t.leaves.data[i]);
+	printf(" }.\n");
+
 	/**/assert(t.leaves.size == words_size);/**/
 	/* Fixme: *//* trie_(&t); */
 	for(i = 0; i < extra_size; i++) {
