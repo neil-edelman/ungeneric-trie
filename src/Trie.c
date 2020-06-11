@@ -422,6 +422,7 @@ static int exact_prefix(const struct Trie *const t, const char *const prefix,
 static int index_remove(struct Trie *const t, size_t i) {
 	size_t n0 = 0, n1 = t->branches.size, last_n0, left;
 	size_t *branch;
+	const char *info = t->leaves.data[i];
 	assert(t && i < t->leaves.size && t->branches.size + 1 == t->leaves.size);
 	/* Remove leaf. */
 	if(!--t->leaves.size) return 1; /* Special case of one leaf. */
@@ -446,6 +447,9 @@ static int index_remove(struct Trie *const t, size_t i) {
 		/* fixme: There is nothing to guarantee this; re-arrange. */
 		assert(child_skip < TRIE_LEFT_MAX - skip);
 		trie_skip_set(branch + 1, child_skip + 1 + skip);
+		printf("%s: branch merge >%u>%u --> >%u.\n", info, skip, child_skip, child_skip + 1 + skip);
+	} else {
+		printf("%s: all leaves under.\n", info);
 	}
 	memmove(branch, branch + 1, sizeof n0 * (--t->branches.size - last_n0));
 	return 1;
@@ -705,12 +709,12 @@ int main(void) {
 	/**/assert(t.leaves.size == words_size + extra_size);/**/
 	for(i = 0; i < words_size; i++) {
 		leaf = exact_get(&t, words[i]);
-		printf("found %s\n", leaf ? leaf : "nothing");
+		printf("found %s --> %s\n", words[i], leaf ? leaf : "nothing");
 		assert(leaf && leaf == words[i]);
 	}
 	for(i = 0; i < extra_size; i++) {
 		leaf = exact_get(&t, extra[i]);
-		printf("found %s\n", leaf ? leaf : "nothing");
+		printf("found %s --> %s\n", extra[i], leaf ? leaf : "nothing");
 		assert(leaf && leaf == extra[i]);
 	}
 
@@ -722,12 +726,12 @@ int main(void) {
 	/**/assert(t.leaves.size == words_size);/**/
 	for(i = 0; i < words_size; i++) {
 		leaf = exact_get(&t, words[i]);
-		printf("delete found %s\n", leaf ? leaf : "nothing");
+		printf("delete found %s --> %s\n", words[i], leaf ? leaf : "nothing");
 		assert(leaf && leaf == words[i]);
 	}
 	for(i = 0; i < extra_size; i++) {
 		leaf = exact_get(&t, extra[i]);
-		printf("delete found %s\n", leaf ? leaf : "nothing");
+		printf("delete found %s --> %s\n", extra[i], leaf ? leaf : "nothing");
 		assert(!leaf);
 	}
 
