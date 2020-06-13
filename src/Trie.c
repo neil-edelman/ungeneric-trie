@@ -453,8 +453,8 @@ static void trie_print(const struct Trie *const t);
  because it could overflow and prevent deletion. */
 static int index_remove(struct Trie *const t, size_t i) {
 	size_t n0 = 0, n1 = t->branches.size, last_n0, left;
-	size_t *branch;
-	const char *info = t->leaves.data[i];
+	size_t *parent, *sibling;
+	const char *const self = t->leaves.data[i];
 	assert(t && i < t->leaves.size && t->branches.size + 1 == t->leaves.size);
 	printf("remove from "), trie_print(t);
 	/* Remove leaf. */
@@ -465,29 +465,24 @@ static int index_remove(struct Trie *const t, size_t i) {
 	 combined without overflow. */
 	/* Remove branch. */
 	for( ; ; ) {
-		left = trie_left(*(branch = t->branches.data + (last_n0 = n0)));
-		/* fixme: is_sibling_branch, sibling: merge the sibling with the parent. */
+		left = trie_left(*(parent = t->branches.data + (last_n0 = n0)));
 		if(i <= left) { /* Pre-order binary search. */
-			if(!left) break;
+			if(!left) { sibling = n0 + 1 < n1 ? t->branches.data + n0 + 1 : 0;
+				break; }
 			n1 = ++n0 + left;
-			trie_left_dec(branch);
+			trie_left_dec(parent);
 		} else {
-			if((n0 += left + 1) >= n1) break;
+			if((n0 += left + 1) >= n1)
+				{ sibling = left ? t->branches.data + n0 - left : 0; break; }
 			i -= left + 1;
 		}
 	}
-	/* If it has a child, merge this branch with the child. */
-	if(n0 < n1) {
-		const unsigned skip = trie_skip(branch[0]),
-			child_skip = trie_skip(branch[1]);
-		/* fixme: There is nothing to guarantee this; re-arrange. */
-		assert(child_skip < TRIE_LEFT_MAX - skip);
-		trie_skip_set(branch + 1, child_skip + 1 + skip);
-		printf("%s: branch merge >%u>%u --> >%u.\n", info, skip, child_skip, child_skip + 1 + skip);
-	} else {
-		printf("%s: all leaves under.\n", info);
-	}
-	memmove(branch, branch + 1, sizeof n0 * (--t->branches.size - last_n0));
+	/* Merge `parent` with `sibling` before deleting `parent`. */
+	printf("self: %s; parent: %u:%lu; sibling %u:%lu.\n", self, trie_skip(*parent), trie_left(*parent), sibling ? trie_skip(*sibling) : 0, sibling ? trie_left(*sibling) : 0);
+	/* fixme: There is nothing to guarantee this; re-arrange. */
+	if(sibling)
+		trie_skip_set(sibling, trie_skip(*sibling) + 1 + trie_skip(*parent));
+	memmove(parent, parent + 1, sizeof n0 * (--t->branches.size - last_n0));
 	printf("now "), trie_print(t);
 	return 1;
 }
@@ -668,16 +663,12 @@ int main(void) {
 	}, *const extra[] = { "foo", "bar", "baz", "qux", "quxx", "a" };
 	const size_t words_size = sizeof words / sizeof *words,
 		extra_size = sizeof extra / sizeof *extra;
-	const char *const a[] = { "foo", "bar", "baz" };
-	const size_t a_size = sizeof a / sizeof *a;
-	struct Trie f;
 	size_t start, end, i;
 	struct Trie t;
 	TrieLeaf leaf, eject;
 	const TrieLeaf word_in = "lambda", word_out = "slithern",
 		prefix_in = "pe", prefix_out = "qz";
 	int success = EXIT_FAILURE;
-	trie(&f);
 	if(!trie_init(&t, words, words_size, 0)) goto catch;
 
 	trie_print(&t);
@@ -739,17 +730,11 @@ int main(void) {
 	}
 	trie_graph(&t, "graph/trie-removed.gv");
 	assert(t.leaves.size == words_size);
-	{ /* Aside. */
-		if(!trie_init(&f, a, a_size, 0)) goto catch;
-		trie_graph(&f, "graph/f-a.gv");
-		exact_remove(&f, "foo");
-		trie_graph(&f, "graph/f-b.gv");
-	}
-	/* test fails for(i = 0; i < words_size; i++) {
+	for(i = 0; i < words_size; i++) {
 		leaf = exact_get(&t, words[i]);
 		printf("delete found %s --> %s\n", words[i], leaf ? leaf : "nothing");
 		assert(leaf && leaf == words[i]);
-	}*/
+	}
 	for(i = 0; i < extra_size; i++) {
 		leaf = exact_get(&t, extra[i]);
 		printf("delete found %s --> %s\n", extra[i], leaf ? leaf : "nothing");
@@ -761,7 +746,6 @@ int main(void) {
 catch:
 	perror("trie");
 finally:
-	trie_(&f);
 	trie_(&t);
 	return success;
 }
