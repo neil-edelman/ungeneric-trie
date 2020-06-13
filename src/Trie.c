@@ -346,16 +346,10 @@ finally:
 /** @return Whether `a` and `b` are equal up to the minimum of their lengths'.
  Used in <fn:exact_prefix>. */
 static int is_prefix(const char *a, const char *b) {
-#if 1 /* This does 2 instead of 3 _per_ char. */
 	for( ; ; a++, b++) {
 		if(*a == '\0') return 1;
 		if(*a != *b) return *b == '\0';
 	}
-#else
-	while(*a != '\0' && *b != '\0')
-		{ if(*a != *b) return 0; a++, b++; }
-	return 1;
-#endif
 }
 
 /** Combines prefix of `t`, `prefix`, `low`, `high`, with compare prefix to get
@@ -455,8 +449,8 @@ static int trie_put(struct Trie *const t, TrieLeaf datum,
 static void trie_print(const struct Trie *const t);
 
 /** Remove leaf index `i` from `t`.
- @fixme Combine sibling's and parent's skips. This is a problem because it
- could overflow and prevent deletion. */
+ @fixme Doesn't work. Combine sibling's and parent's skips. This is a problem
+ because it could overflow and prevent deletion. */
 static int index_remove(struct Trie *const t, size_t i) {
 	size_t n0 = 0, n1 = t->branches.size, last_n0, left;
 	size_t *branch;
@@ -498,8 +492,7 @@ static int index_remove(struct Trie *const t, size_t i) {
 	return 1;
 }
 
-/** Removes `key` from `t`.
- @return Whether `key` was found in `t` and was removed. */
+/** Removes `key` from `t`. @return Success. */
 static int exact_remove(struct Trie *const t, const char *const key) {
 	size_t i;
 	assert(t && key);
@@ -686,7 +679,6 @@ int main(void) {
 	int success = EXIT_FAILURE;
 	trie(&f);
 	if(!trie_init(&t, words, words_size, 0)) goto catch;
-	/*if(!trie_init(&t, extra, extra_size, 0)) goto catch;*/
 
 	trie_print(&t);
 	trie_graph(&t, "graph/trie-all-at-once.gv");
@@ -721,8 +713,7 @@ int main(void) {
 		printf("%s%s", i == start ? "" : ", ", t.leaves.data[i]);
 	printf(" }.\n");
 
-	/**/assert(t.leaves.size == words_size);/**/
-	/* Fixme: *//* trie_(&t); */
+	assert(t.leaves.size == words_size);
 	for(i = 0; i < extra_size; i++) {
 		char fn[64];
 		if(!trie_put(&t, extra[i], &eject, 0)) goto catch;
@@ -730,7 +721,7 @@ int main(void) {
 		trie_graph(&t, fn);
 		printf("out: %s\n", fn);
 	}
-	/**/assert(t.leaves.size == words_size + extra_size);/**/
+	assert(t.leaves.size == words_size + extra_size);
 	for(i = 0; i < words_size; i++) {
 		leaf = exact_get(&t, words[i]);
 		printf("found %s --> %s\n", words[i], leaf ? leaf : "nothing");
@@ -747,8 +738,8 @@ int main(void) {
 		assert(is);
 	}
 	trie_graph(&t, "graph/trie-removed.gv");
-	/**/assert(t.leaves.size == words_size);/**/
-	{
+	assert(t.leaves.size == words_size);
+	{ /* Aside. */
 		if(!trie_init(&f, a, a_size, 0)) goto catch;
 		trie_graph(&f, "graph/f-a.gv");
 		exact_remove(&f, "foo");
