@@ -1,4 +1,8 @@
-/** @title Prefix Tree */
+/** @title Prefix Tree
+
+ @fixme Don't put two strings side-by-side or delete one that causes two
+ strings to be side-by-side that have more than 512 matching characters in the
+ same bit-positions. */
 
 #include <stdlib.h> /* EXIT malloc free qsort */
 #include <stdio.h>  /* printf */
@@ -203,16 +207,12 @@ static unsigned trie_is_bit(const char *const a, const unsigned bit) {
 struct Trie { struct BranchArray branches; struct LeafArray leaves; };
 
 /** Initialises `t` to idle. */
-static void trie(struct Trie *const t) {
-	assert(t);
-	branch_array(&t->branches), leaf_array(&t->leaves);
-}
+static void trie(struct Trie *const t)
+	{ assert(t); branch_array(&t->branches), leaf_array(&t->leaves); }
 
 /** Returns an initialised `t` to idle. */
-static void trie_(struct Trie *const t) {
-	assert(t);
-	branch_array_(&t->branches), leaf_array_(&t->leaves);
-}
+static void trie_(struct Trie *const t)
+	{ assert(t); branch_array_(&t->branches), leaf_array_(&t->leaves); }
 
 /** Recursive function used for <fn:trie_init>. Initialise branches of `t`
  up to `bit` with `a` to `a_size` array of sorted leaves.
@@ -588,7 +588,7 @@ static void trie_graph(const struct Trie *const t, const char *const fn) {
 
 int main(void) {
 	const char *const words[] = {
-/*"wryer","posturists","nonanswers","collations","renovating","view","kiddingly",
+"wryer","posturists","nonanswers","collations","renovating","view","kiddingly",
 "lineman","elating","convocate","tonically","steradians","disdained",
 "hypervigilance","annexational","scabiosas","pinfishes","disinhibited",
 "coryphenes","omohyoid","mongoes","tarries","oestrin","decillion","tutorships",
@@ -655,7 +655,7 @@ int main(void) {
 "asperse","cotyledons","forekings","fico","subclaim","chorus","homesteaders",
 "prometals","transudates","glamourless","sphygmographs","traversal",
 "thimbleriggers","shaken","undefaced","jeopardy","enheartening","dentural",
-"fluorides","loganias","gladsomeness","locule","oestrones","militantnesses",*/
+"fluorides","loganias","gladsomeness","locule","oestrones","militantnesses",
 "skrieghs","smouldry","crower","pellicles","sapucaias","underuses","reexplored",
 "chlamydia","tragediennes","levator","accipiter","esquisses","intentnesses",
 "julienning","tetched","creeshing","anaphrodisiacs","insecurities","tarpons",
