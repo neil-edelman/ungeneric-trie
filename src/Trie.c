@@ -103,10 +103,11 @@ static void leaf_compactify(struct LeafArray *const a,
 }
 
 
-/* Trie internal nodes are semi-implicit . Each contains two items of
- information in a `size_t`: left children branches are <fn:trie_left>
- immediately following, right children are the rest, and <fn:trie_bit>, the
- bit at which the all the branches on the left differ from that on the right. */
+/* Trie internal nodes encode the branches semi-implicitly. Each contains two
+ items of information in a `size_t`: left children branches are <fn:trie_left>
+ immediately following, right children are the rest; <fn:trie_skip>, the length
+ of the string trie branch in bytes beyond the first byte, don't care values
+ for the index. */
 typedef size_t TrieBranch;
 
 struct BranchArray { TrieBranch *data; size_t size, capacity; };
@@ -151,39 +152,39 @@ static TrieBranch *branch_new(struct BranchArray *const a) {
 	assert(a); return branch_reserve(a, a->size + 1) ? a->data + a->size++ : 0;
 }
 
-/* 12 makes the maximum skip length 512 bytes and the maximum size of a trie is
+/* 12 makes the maximum skip length 511 bytes and the maximum size of a trie is
  `size_t` 64-bits: 4503599627370495, 32-bits: 1048575, and 16-bits: 15. */
 #define TRIE_SKIP 12
 #define TRIE_SKIP_MAX ((1 << TRIE_SKIP) - 1)
 #define TRIE_LEFT_MAX (((size_t)1 << ((sizeof(size_t) << 3) - TRIE_SKIP)) - 1)
 
 /** @return Packs `skip` and `left` into a branch. */
-static TrieBranch trie_branch(const unsigned skip, const size_t left) {
+static TrieBranch trie_branch(const size_t skip, const size_t left) {
 	assert(skip <= TRIE_SKIP_MAX && left <= TRIE_LEFT_MAX);
 	return skip + (left << TRIE_SKIP);
 }
 
 /** @return Unpacks skip from `branch`. */
-static unsigned trie_skip(const TrieBranch branch)
-	{ return (unsigned)branch & TRIE_SKIP_MAX; }
+static size_t trie_skip(const TrieBranch branch)
+	{ return branch & TRIE_SKIP_MAX; }
 
-/** @return Unpacks left sub-branches from `branch`. */
+/** @return Unpacks left descendent branches from `branch`. */
 static size_t trie_left(const TrieBranch branch) { return branch >> TRIE_SKIP; }
 
-/** Overwrites `branch` `skip`. */
-static void trie_skip_set(size_t *const branch, unsigned skip) {
+/** Overwrites `skip` in `branch`. */
+static void trie_skip_set(size_t *const branch, size_t skip) {
 	assert(branch && skip <= TRIE_SKIP_MAX);
 	*branch &= ~TRIE_SKIP_MAX;
 	*branch += skip;
 }
 
-/** Increments the left `branch` count. */
+/** Increments the left descendants `branch` count. */
 static void trie_left_inc(size_t *const branch) {
 	assert(branch && *branch < ~(size_t)TRIE_SKIP_MAX);
 	*branch += TRIE_SKIP_MAX + 1;
 }
 
-/** Decrements the left `branch` count. */
+/** Decrements the left descendants `branch` count. */
 static void trie_left_dec(size_t *const branch) {
 	assert(branch && *branch > TRIE_SKIP_MAX);
 	*branch -= TRIE_SKIP_MAX + 1;
@@ -193,15 +194,24 @@ static void trie_left_dec(size_t *const branch) {
  @return In the `bit` position, positive if `a` is after `b`, negative if `a`
  is before `b`, or zero if `a` is equal to `b`. */
 static int trie_strcmp_bit(const char *const a, const char *const b,
-	const unsigned bit) {
-	const unsigned byte = bit >> 3, mask = 128 >> (bit & 7);
-	return (a[byte] & mask) - (b[byte] & mask);
+	const size_t bit) {
+	const size_t byte = bit >> 3, mask = 128 >> (bit & 7);
+	return !(b[byte] & mask) - !(a[byte] & mask);
 }
 
-/** From string `a`, extract `bit` and return zero or non-zero if one. */
-static unsigned trie_is_bit(const char *const a, const unsigned bit) {
-	const unsigned byte = bit >> 3, mask = 128 >> (bit & 7);
-	return a[byte] & mask;
+/** From string `a`, extract `bit`. */
+static int trie_is_bit(const char *const a, const size_t bit) {
+	const size_t byte = bit >> 3, mask = 128 >> (bit & 7);
+	return !!(a[byte] & mask);
+}
+
+/** @return Whether `a` and `b` are equal up to the minimum of their lengths'.
+ Used in <fn:prefix>. */
+static int trie_is_prefix(const char *a, const char *b) {
+	for( ; ; a++, b++) {
+		if(*a == '\0') return 1;
+		if(*a != *b) return *b == '\0';
+	}
 }
 
 
@@ -219,15 +229,15 @@ static void trie_(struct Trie *const t)
 /** Recursive function used for <fn:trie_init>. Initialise branches of `t`
  up to `bit` with `a` to `a_size` array of sorted leaves.
  @order Speed \O(`a_size` log E(`a.length`))?; memory \O(E(`a.length`)). */
-static void trie_init_branches_r(struct Trie *const t, unsigned bit,
+static void trie_init_branches_r(struct Trie *const t, size_t bit,
 	const size_t a, const size_t a_size) {
 	size_t b = a, b_size = a_size, half;
-	unsigned skip = 0;
+	size_t skip = 0;
 	TrieBranch *branch;
 	assert(t && a_size && a_size <= t->leaves.size && t->leaves.size
 		&& t->branches.capacity >= t->leaves.size - 1);
 	if(a_size <= 1) return;
-	/* Endpoints of sorted range: skip [_1_111...] or [...000_0_].
+	/* Endpoints of sorted range: skip [_1_111...] or [...000_0_] don't care.
 	 fixme: UINT_MAX overflow. */
 	while(trie_is_bit(t->leaves.data[a], bit)
 		|| !trie_is_bit(t->leaves.data[a + a_size - 1], bit)) bit++, skip++;
@@ -236,7 +246,7 @@ static void trie_init_branches_r(struct Trie *const t, unsigned bit,
 		trie_is_bit(t->leaves.data[b + half], bit)
 		? b_size = half : (half++, b += half, b_size -= half);
 	b_size = b - a;
-	/* Should have space for all branches pre-allocated, (right?) */
+	/* Should have space for all branches pre-allocated in <fn:<PN>init>. */
 	branch = branch_new(&t->branches), assert(branch);
 	*branch = trie_branch(skip, b_size - 1);
 	bit++;
@@ -246,13 +256,13 @@ static void trie_init_branches_r(struct Trie *const t, unsigned bit,
 
 /** Initialises `t` to `a` of size `a_size`, which cannot be zero.
  @param[merge] Called with any duplicate entries and replaces if true; if
- null, doesn't replace. @return Success. */
+ null, doesn't replace. @return Success. @throws[ERANGE, malloc] */
 static int trie_init(struct Trie *const t, const TrieLeaf *const a,
 	const size_t a_size, const TrieBipredicate merge) {
 	TrieLeaf *leaves;
 	assert(t && a && a_size);
 	trie(t);
-	/* This will store all of the duplicates, as well. */
+	/* This will store space for all of the duplicates, as well. */
 	if(!leaf_reserve(&t->leaves, a_size)
 		|| !branch_reserve(&t->branches, a_size - 1)) return 0;
 	leaves = t->leaves.data;
@@ -266,20 +276,22 @@ static int trie_init(struct Trie *const t, const TrieLeaf *const a,
 	return 1;
 }
 
-/** Looks at only the index potential matches.
- @return True if `key` in `t` has matched all `result`.
- @order \O(`key.length`) */
-static int awkward_get(const struct Trie *const t, const char *const key,
+/** Looks at only the index for potential matches.
+ @param[result] A index pointer to leaves that matches `key` when true.
+ @return True if `key` in `trie` has matched, otherwise `key` is definitely is
+ not in `trie`. @order \O(`key.length`) */
+static int param_index_get(const struct Trie *const t, const char *const key,
 	size_t *const result) {
 	size_t n0 = 0, n1 = t->leaves.size, i = 0, left;
 	TrieBranch branch;
-	unsigned n0_byte, str_byte = 0, bit = 0; /* `bit` should be size_t */
+	size_t n0_byte, str_byte = 0, bit = 0;
 	assert(t && key && result);
-	if(!n1) return 0; /* Special case: empty has no matches. */
+	if(!n1) return 0; /* Special case: there is nothing to match. */
 	n1--, assert(n1 == t->branches.size);
 	while(n0 < n1) {
 		branch = t->branches.data[n0];
 		bit += trie_skip(branch);
+		/* Skip the don't care bits, ending up at the decision bit. */
 		for(n0_byte = bit >> 3; str_byte < n0_byte; str_byte++)
 			if(key[str_byte] == '\0') return 0;
 		left = trie_left(branch);
@@ -292,34 +304,36 @@ static int awkward_get(const struct Trie *const t, const char *const key,
 	return 1;
 }
 
-/** @return True if found the exact `key` in `t` and stored it in `result`. */
-static int awkward_exact_get(const struct Trie *const t,
+/** @return True if found the exact `key` in `t` and stored it's index in
+ `result`. */
+static int param_get(const struct Trie *const t,
 	const char *const key, size_t *const result) {
-	return awkward_get(t, key, result) && !strcmp(t->leaves.data[*result], key);
+	return param_index_get(t, key, result)
+		&& !strcmp(t->leaves.data[*result], key);
 }
 
 /** @return `t` entry that matches trie bits of `key`, (ignoring the don't care
- bits,) or null if `key` didn't have the length to fully differentiate more
- then one trie entry. */
+ bits,) or null if either `key` didn't have the length to fully differentiate
+ more then one entry or the `trie` is empty. */
 static TrieLeaf index_get(const struct Trie *const t, const char *const key) {
 	size_t i;
-	return awkward_get(t, key, &i) ? t->leaves.data[i] : 0;
+	return param_index_get(t, key, &i) ? t->leaves.data[i] : 0;
 }
 
 /** @return Exact match for `key` in `t` or null. */
-static TrieLeaf exact_get(const struct Trie *const t, const char *const key) {
+static TrieLeaf trie_get(const struct Trie *const t, const char *const key) {
 	size_t i;
-	return awkward_exact_get(t, key, &i) ? t->leaves.data[i] : 0;
+	return param_get(t, key, &i) ? t->leaves.data[i] : 0;
 }
 
 /** In `t`, which must be non-empty, given a partial `prefix`, stores all leaf
- prefix matches between `low`, `high`, ignoring don't care bits.
- @order \O(`key.length`) */
+ prefix matches between `low`, `high`, only given the index, ignoring don't
+ care bits. @order \O(`prefix.length`) */
 static void index_prefix(const struct Trie *const t, const char *const prefix,
 	size_t *const low, size_t *const high) {
 	size_t n0 = 0, n1 = t->leaves.size, i = 0, left;
 	TrieBranch branch;
-	unsigned n0_byte, str_byte = 0, bit = 0;
+	size_t n0_byte, str_byte = 0, bit = 0;
 	assert(t && prefix && low && high && n1);
 	n1--, assert(n1 == t->branches.size);
 	while(n0 < n1) {
@@ -339,22 +353,13 @@ finally:
 	*low = i, *high = i - n0 + n1;
 }
 
-/** @return Whether `a` and `b` are equal up to the minimum of their lengths'.
- Used in <fn:exact_prefix>. */
-static int is_prefix(const char *a, const char *b) {
-	for( ; ; a++, b++) {
-		if(*a == '\0') return 1;
-		if(*a != *b) return *b == '\0';
-	}
-}
-
 /** @return Whether, in `t`, given a partial `prefix`, it has found `low`,
  `high` prefix matches. */
-static int exact_prefix(const struct Trie *const t, const char *const prefix,
+static int trie_prefix(const struct Trie *const t, const char *const prefix,
 	size_t *const low, size_t *const high) {
 	assert(t && prefix && low && high);
 	return t->leaves.size ? (index_prefix(t, prefix, low, high),
-		is_prefix(prefix, t->leaves.data[*low])) : 0;
+		trie_is_prefix(prefix, t->leaves.data[*low])) : 0;
 }
 
 /** Add `datum` to `t`. Must not be the same as any key of trie; _ie_ it
@@ -363,27 +368,24 @@ static int exact_prefix(const struct Trie *const t, const char *const prefix,
  where the pointer is 64-bits, is 4.5T. On 32-bits, it's 1M.
  @throws[realloc, ERANGE] @fixme Throw EILSEQ if two strings have subsequences
  that are equal in more than 2^12 bits. */
-static int index_add(struct Trie *const t, TrieLeaf datum) {
+static int trie_add(struct Trie *const t, TrieLeaf datum) {
 	const size_t leaf_size = t->leaves.size, branch_size = leaf_size - 1;
-	size_t n0 = 0, n1 = branch_size, i = 0, left;
+	size_t n0 = 0, n1 = branch_size, i = 0, left, bit = 0, bit0 = 0, bit1;
 	TrieBranch *branch = 0;
 	const char *n0_key;
-	unsigned bit0 = 0, bit1, bit = 0;
 	TrieLeaf *leaf;
 	int cmp;
-	int is_internal, is_root;
-	/* Empty special case. */
 	assert(t && datum);
+	/* Empty special case. */
 	if(!leaf_size) return assert(!t->branches.size),
 		(leaf = leaf_new(&t->leaves)) ? *leaf = datum, 1 : 0;
-	/* Reserve more from non-empty.
-	 (Waste `size_t`, but maybe more complex VLQ like Judy?) */
+	/* Redundant `size_t`, but maybe we will use it like Judy. */
 	assert(leaf_size == branch_size + 1);
-	/* Conservative; assuming a maximally unbalanced trie, probably 2x this. */
+	/* Conservative maximally unbalanced trie. Reserve one more. */
 	if(leaf_size > TRIE_LEFT_MAX) return errno = ERANGE, 0;
 	if(!leaf_reserve(&t->leaves, leaf_size + 1)
 		|| !branch_reserve(&t->branches, branch_size + 1)) return 0;
-	/* Branch from internal nodes. */
+	/* Branch from internal node. */
 	while(branch = t->branches.data + n0, n0_key = t->leaves.data[i], n0 < n1) {
 		/* fixme: Detect overflow 12 bits between. */
 		for(bit1 = bit + trie_skip(*branch); bit < bit1; bit++)
@@ -401,44 +403,44 @@ insert:
 	/* How many left entries are there to move. */
 	if(cmp < 0) left = 0;
 	else left = n1 - n0, i += left + 1;
-	/* Assign human names to predicates. */
-	is_internal = (n0 != n1);
-	is_root = !n0;
-	/* Insert one branch, (it's a full binary tree.) */
-	branch = t->branches.data + n0;
-	if(is_internal) { /* Split the skip value with the existing branch. */
-		const unsigned branch_skip = trie_skip(*branch);
-		assert(branch_skip + bit0 >= bit + is_root);
-		trie_skip_set(branch, branch_skip + bit0 - bit - is_root);
-	}
-	memmove(branch + 1, branch, sizeof *branch * (branch_size - n0));
-	*branch = trie_branch(bit - bit0 - !is_root, left), t->branches.size++;
 	/* Insert leaf. */
 	leaf = t->leaves.data + i;
 	memmove(leaf + 1, leaf, sizeof *leaf * (leaf_size - i));
 	*leaf = datum, t->leaves.size++;
+	/* Insert branch. */
+	branch = t->branches.data + n0;
+	if(n0 != n1) { /* Split the skip value with the existing branch. */
+		const size_t branch_skip = trie_skip(*branch);
+		assert(branch_skip + bit0 >= bit + !n0);
+		trie_skip_set(branch, branch_skip + bit0 - bit - !n0);
+	}
+	memmove(branch + 1, branch, sizeof *branch * (branch_size - n0));
+	*branch = trie_branch(bit - bit0 - !!n0, left), t->branches.size++;
 	return 1;
 }
 
 /** Adds `datum` to `t` and, if `eject` is non-null, stores the collided
  element, if any, as long as `replace` is null or returns true.
  @param[eject] If not-null, the ejected datum. If `replace` returns false, then
- `*eject == datum`. @return Success. @throws[realloc, ERANGE] */
+ `*eject == datum`, but it will still return true.
+ @return Success. @throws[realloc, ERANGE] */
 static int trie_put(struct Trie *const t, TrieLeaf datum,
 	TrieLeaf *const eject, const TrieBipredicate replace) {
-	TrieLeaf match;
+	TrieLeaf *match;
+	size_t i;
 	assert(t && datum);
 	/* Add if absent. */
-	if(!(match = exact_get(t, datum))) {
+	if(!param_get(t, datum, &i)) {
 		if(eject) *eject = 0;
-		return index_add(t, datum);
+		return trie_add(t, datum);
 	}
+	assert(i < t->leaves.size), match = t->leaves.data + i;
 	/* Collision policy. */
-	if(replace && !replace(match, datum)) {
+	if(replace && !replace(*match, datum)) {
 		if(eject) *eject = datum;
 	} else {
-		if(eject) *eject = match;
-		match = datum;
+		if(eject) *eject = *match;
+		*match = datum;
 	}
 	return 1;
 }
@@ -446,8 +448,8 @@ static int trie_put(struct Trie *const t, TrieLeaf datum,
 /** @return Whether leaf index `i` has been removed from `t`.
  @fixme There is nothing stopping an `assert` from being triggered. */
 static int index_remove(struct Trie *const t, size_t i) {
-	size_t n0 = 0, n1 = t->branches.size, last_n0, left;
-	size_t *parent, *sibling; /* Branches. */
+	size_t n0 = 0, n1 = t->branches.size, parent_n0, left;
+	size_t *parent, *twin; /* Branches. */
 	assert(t && i < t->leaves.size && t->branches.size + 1 == t->leaves.size);
 	/* Remove leaf. */
 	if(!--t->leaves.size) return 1; /* Special case of one leaf. */
@@ -457,32 +459,32 @@ static int index_remove(struct Trie *const t, size_t i) {
 	 combined without overflow. */
 	/* Remove branch. */
 	for( ; ; ) {
-		left = trie_left(*(parent = t->branches.data + (last_n0 = n0)));
+		left = trie_left(*(parent = t->branches.data + (parent_n0 = n0)));
 		if(i <= left) { /* Pre-order binary search. */
-			if(!left) { sibling = n0 + 1 < n1 ? t->branches.data + n0 + 1 : 0;
+			if(!left) { twin = n0 + 1 < n1 ? t->branches.data + n0 + 1 : 0;
 				break; }
 			n1 = ++n0 + left;
 			trie_left_dec(parent);
 		} else {
 			if((n0 += left + 1) >= n1)
-				{ sibling = left ? t->branches.data + n0 - left : 0; break; }
+				{ twin = left ? t->branches.data + n0 - left : 0; break; }
 			i -= left + 1;
 		}
 	}
 	/* Merge `parent` with `sibling` before deleting `parent`. */
-	if(sibling)
+	if(twin)
 		/* fixme: There is nothing to guarantee this. */
-		assert(trie_skip(*sibling) < TRIE_SKIP_MAX - trie_skip(*parent)),
-		trie_skip_set(sibling, trie_skip(*sibling) + 1 + trie_skip(*parent));
-	memmove(parent, parent + 1, sizeof n0 * (--t->branches.size - last_n0));
+		assert(trie_skip(*twin) < TRIE_SKIP_MAX - trie_skip(*parent)),
+		trie_skip_set(twin, trie_skip(*twin) + 1 + trie_skip(*parent));
+	memmove(parent, parent + 1, sizeof n0 * (--t->branches.size - parent_n0));
 	return 1;
 }
 
 /** @return Whether `key` has been removed from `t`. */
-static int exact_remove(struct Trie *const t, const char *const key) {
+static int trie_remove(struct Trie *const t, const char *const key) {
 	size_t i;
 	assert(t && key);
-	return awkward_exact_get(t, key, &i) && index_remove(t, i);
+	return param_get(t, key, &i) && index_remove(t, i);
 }
 
 
@@ -499,7 +501,7 @@ static void trie_print(const struct Trie *const t) {
 		printf("%s%s", i ? ", " : "", t->leaves.data[i]);
 	printf("}; {");
 	for(n = 0; n < t->branches.size; n++)
-		printf("%s%u:%lu", n ? ", " : "", trie_skip(t->branches.data[n]),
+		printf("%s%lu:%lu", n ? ", " : "", trie_skip(t->branches.data[n]),
 		(unsigned long)trie_left(t->branches.data[n]));
 	printf("}.\n");
 }
@@ -553,7 +555,7 @@ static void trie_graph(const struct Trie *const t, const char *const fn) {
 	for(n = 0; n < t->branches.size; n++) {
 		const size_t branch = t->branches.data[n];
 		const size_t left = trie_left(branch), right = trie_right(t, n);
-		fprintf(fp, "\tbranch%lu [label = \"%u\"];\n"
+		fprintf(fp, "\tbranch%lu [label = \"%lu\"];\n"
 			"\tbranch%lu -> ", (unsigned long)n, trie_skip(branch),
 			(unsigned long)n);
 		if(left) fprintf(fp, "branch%lu [style = dashed]; // left branch\n",
@@ -670,9 +672,9 @@ int main(void) {
 	leaf = index_get(&t, word_out);
 	printf("index get: %s --> %s\n", word_out, leaf);
 
-	leaf = exact_get(&t, word_in);
+	leaf = trie_get(&t, word_in);
 	printf("exact get: %s --> %s\n", word_in, leaf);
-	leaf = exact_get(&t, word_out);
+	leaf = trie_get(&t, word_out);
 	printf("exact get: %s --> %s\n", word_out, leaf);
 
 	index_prefix(&t, prefix_in, &start, &end);
@@ -687,11 +689,11 @@ int main(void) {
 	printf(" }.\n");
 
 	printf("exact prefix: %s --> { ", prefix_in);
-	if(exact_prefix(&t, prefix_in, &start, &end)) for(i = start; i <= end; i++)
+	if(trie_prefix(&t, prefix_in, &start, &end)) for(i = start; i <= end; i++)
 		printf("%s%s", i == start ? "" : ", ", t.leaves.data[i]);
 	printf(" }.\n");
 	printf("exact prefix: %s --> { ", prefix_out);
-	if(exact_prefix(&t, prefix_out, &start, &end)) for(i = start; i <= end; i++)
+	if(trie_prefix(&t, prefix_out, &start, &end)) for(i = start; i <= end; i++)
 		printf("%s%s", i == start ? "" : ", ", t.leaves.data[i]);
 	printf(" }.\n");
 
@@ -704,30 +706,30 @@ int main(void) {
 	}
 	assert(t.leaves.size == words_size + extra_size);
 	for(i = 0; i < words_size; i++) {
-		leaf = exact_get(&t, words[i]);
+		leaf = trie_get(&t, words[i]);
 		/*printf("found %s --> %s\n", words[i], leaf ? leaf : "nothing");*/
 		assert(leaf && leaf == words[i]);
 	}
 	for(i = 0; i < extra_size; i++) {
-		leaf = exact_get(&t, extra[i]);
+		leaf = trie_get(&t, extra[i]);
 		/*printf("found %s --> %s\n", extra[i], leaf ? leaf : "nothing");*/
 		assert(leaf && leaf == extra[i]);
 	}
 
 	for(i = 0; i < extra_size; i++) {
-		const int is = exact_remove(&t, extra[i]);
+		const int is = trie_remove(&t, extra[i]);
 		assert(is);
 	}
 	trie_graph(&t, "graph/trie-removed.gv");
 	assert(t.leaves.size == words_size);
 	for(i = 0; i < words_size; i++) {
-		leaf = exact_get(&t, words[i]);
+		leaf = trie_get(&t, words[i]);
 		/*printf("delete found %s --> %s\n",
 			words[i], leaf ? leaf : "nothing");*/
 		assert(leaf && leaf == words[i]);
 	}
 	for(i = 0; i < extra_size; i++) {
-		leaf = exact_get(&t, extra[i]);
+		leaf = trie_get(&t, extra[i]);
 		/*printf("delete found %s --> %s\n",
 			extra[i], leaf ? leaf : "nothing");*/
 		assert(!leaf);
