@@ -102,6 +102,9 @@ static void leaf_compactify(struct LeafArray *const a,
 	a->size = target;
 }
 
+/** Clears `a` but leaves the memory. */
+static void leaf_clear(struct LeafArray *const a) { assert(a); a->size = 0; }
+
 
 /* Trie internal nodes encode the branches semi-implicitly. Each contains two
  items of information in a `size_t`: left children branches are <fn:trie_left>
@@ -256,7 +259,8 @@ static void trie_init_branches_r(struct Trie *const t, size_t bit,
 
 /** Initialises `t` to `a` of size `a_size`, which cannot be zero.
  @param[merge] Called with any duplicate entries and replaces if true; if
- null, doesn't replace. @return Success. @throws[ERANGE, malloc] */
+ null, doesn't replace. @return Success. @throws[ERANGE, malloc]
+ @fixme I hear that there's a better way to do this in the literature. */
 static int trie_init(struct Trie *const t, const TrieLeaf *const a,
 	const size_t a_size, const TrieBipredicate merge) {
 	TrieLeaf *leaves;
@@ -282,22 +286,24 @@ static int trie_init(struct Trie *const t, const TrieLeaf *const a,
  not in `trie`. @order \O(`key.length`) */
 static int param_index_get(const struct Trie *const t, const char *const key,
 	size_t *const result) {
-	size_t n0 = 0, n1 = t->leaves.size, i = 0, left;
-	TrieBranch branch;
-	size_t n0_byte, str_byte = 0, bit = 0;
+	/* `(n0, n1]` is the index of pre-order `ancestor` (`n0`) and all
+	 descendant branches. `i` is the leaf index. `left` is all ancestor's left
+	 branches. */
+	size_t n0 = 0, n1 = t->branches.size, i = 0, left;
+	TrieBranch ancestor;
+	size_t byte, key_byte = 0, bit = 0;
 	assert(t && key && result);
-	if(!n1) return 0; /* Special case: there is nothing to match. */
-	n1--, assert(n1 == t->branches.size);
+	if(!t->leaves.size) return assert(!n1), 0; /* Empty tree. */
+	assert(n1 + 1 == t->leaves.size); /* Full binary tree. */
 	while(n0 < n1) {
-		branch = t->branches.data[n0];
-		bit += trie_skip(branch);
-		/* Skip the don't care bits, ending up at the decision bit. */
-		for(n0_byte = bit >> 3; str_byte < n0_byte; str_byte++)
-			if(key[str_byte] == '\0') return 0;
-		left = trie_left(branch);
-		if(!trie_is_bit(key, bit)) n1 = ++n0 + left;
+		ancestor = t->branches.data[n0];
+		bit += trie_skip(ancestor);
+		/* `key` ends at an internal branch; '\0' is part of `key`. */
+		for(byte = bit >> 3; key_byte < byte; key_byte++)
+			if(key[key_byte] == '\0') return 0;
+		left = trie_left(ancestor);
+		if(!trie_is_bit(key, bit++)) n1 = ++n0 + left;
 		else n0 += left + 1, i += left + 1;
-		bit++;
 	}
 	assert(n0 == n1 && i < t->leaves.size);
 	*result = i;
@@ -331,21 +337,20 @@ static TrieLeaf trie_get(const struct Trie *const t, const char *const key) {
  care bits. @order \O(`prefix.length`) */
 static void index_prefix(const struct Trie *const t, const char *const prefix,
 	size_t *const low, size_t *const high) {
-	size_t n0 = 0, n1 = t->leaves.size, i = 0, left;
+	size_t n0 = 0, n1 = t->branches.size, i = 0, left;
 	TrieBranch branch;
-	size_t n0_byte, str_byte = 0, bit = 0;
-	assert(t && prefix && low && high && n1);
-	n1--, assert(n1 == t->branches.size);
+	size_t byte, key_byte = 0, bit = 0;
+	assert(t && prefix && low && high);
+	assert(n1 + 1 == t->leaves.size); /* Full binary tree. */
 	while(n0 < n1) {
 		branch = t->branches.data[n0];
 		bit += trie_skip(branch);
-		/* _Sic_; '\0' is _not_ included for partial match. */
-		for(n0_byte = bit >> 3; str_byte <= n0_byte; str_byte++)
-			if(prefix[str_byte] == '\0') goto finally;
+		/* '\0' is not included for partial match. */
+		for(byte = bit >> 3; key_byte <= byte; key_byte++)
+			if(prefix[key_byte] == '\0') goto finally;
 		left = trie_left(branch);
-		if(!trie_is_bit(prefix, bit)) n1 = ++n0 + left;
+		if(!trie_is_bit(prefix, bit++)) n1 = ++n0 + left;
 		else n0 += left + 1, i += left + 1;
-		bit++;
 	}
 	assert(n0 == n1);
 finally:
@@ -450,14 +455,12 @@ static int trie_put(struct Trie *const t, TrieLeaf datum,
 static int index_remove(struct Trie *const t, size_t i) {
 	size_t n0 = 0, n1 = t->branches.size, parent_n0, left;
 	size_t *parent, *twin; /* Branches. */
-	assert(t && i < t->leaves.size && t->branches.size + 1 == t->leaves.size);
+	assert(t && i < t->leaves.size && n1 + 1 == t->leaves.size);
 	/* Remove leaf. */
-	if(!--t->leaves.size) return 1; /* Special case of one leaf. */
+	if(!--t->leaves.size) return 1; /* Phase transition to empty. */
 	memmove(t->leaves.data + i, t->leaves.data + i + 1,
 		sizeof t->leaves.data * (n1 - i));
-	/* fixme: Do another descent _not_ modifying to see if the values can be
-	 combined without overflow. */
-	/* Remove branch. */
+	/* Traverse trie getting `parent` and `twin`. */
 	for( ; ; ) {
 		left = trie_left(*(parent = t->branches.data + (parent_n0 = n0)));
 		if(i <= left) { /* Pre-order binary search. */
@@ -471,12 +474,13 @@ static int index_remove(struct Trie *const t, size_t i) {
 			i -= left + 1;
 		}
 	}
-	/* Merge `parent` with `sibling` before deleting `parent`. */
+	/* Merge `parent` with `twin` before deleting `parent` branch. */
 	if(twin)
 		/* fixme: There is nothing to guarantee this. */
 		assert(trie_skip(*twin) < TRIE_SKIP_MAX - trie_skip(*parent)),
 		trie_skip_set(twin, trie_skip(*twin) + 1 + trie_skip(*parent));
-	memmove(parent, parent + 1, sizeof n0 * (--t->branches.size - parent_n0));
+	memmove(parent, parent + 1,
+		sizeof *t->branches.data * (--t->branches.size - parent_n0));
 	return 1;
 }
 
@@ -485,6 +489,81 @@ static int trie_remove(struct Trie *const t, const char *const key) {
 	size_t i;
 	assert(t && key);
 	return param_get(t, key, &i) && index_remove(t, i);
+}
+
+
+/* Errors. */
+
+
+/* <Levenshtein>:
+ - Insertion: -> b;
+ - Deletion: a ->;
+ - Substitution: a -> b
+ <Damerau>:
+ - transpositions: ab -> ba */
+
+/*struct TriePosition {
+	const struct Trie *t;
+	const char *key;
+	size_t n0, n1, i, bit;
+	unsigned edit;
+	struct LeafArray *output;
+};*/
+
+/** Breath-first-search `t` for `edit` Levenshtein edits away from `key` and
+ appends `output`. @order I don't know. */
+static int suggest_r(const struct Trie *const t, const char *key,
+	struct LeafArray *const output, const unsigned edit,
+	size_t n0, size_t n1, size_t i, size_t bit,
+	const unsigned depth) {
+	size_t left;
+	TrieBranch branch;
+	size_t byte, key_byte = bit >> 3, start_byte = key_byte, future_bit;
+	TrieLeaf *new_key;
+	unsigned d;
+	assert(t && key && output && n0 <= n1 && n1 < t->leaves.size);
+	for(d = 0; d < depth; d++) fputc('\t', stdout);
+	printf("{ \"%s\" edit %u, n=[%lu, %lu], i=%lu, bit=%lu\n",
+		key, edit, n0, n1, i, bit);
+
+	/* BFS limit of `edit`; first edit. */
+	if(edit && key[0] != '\0') /* Deletion. */
+		suggest_r(t, key + 1, output, edit - 1, n0, n1, i, bit, depth + 1);
+
+	while(n0 < n1) {
+		branch = t->branches.data[n0];
+		future_bit = bit + trie_skip(branch);
+		/* `key` ends at an internal branch; NUL-terminator is part of `key`. */
+		for(byte = future_bit >> 3; key_byte < byte; key_byte++)
+			if(key[key_byte] == '\0') { for(d = 0; d < depth + 1; d++) fputc('\t', stdout); printf("internal node\n"); return 1; }
+
+		/* BFS, subsequent edits only if we are on the next byte. */
+		if(edit && start_byte < key_byte) /* Deletion. */
+			start_byte = key_byte,
+			suggest_r(t, key + 1, output, edit - 1, n0, n1, i, bit, depth + 1);
+
+		bit = future_bit;
+		left = trie_left(branch);
+		for(d = 0; d < depth + 1; d++) fputc('\t', stdout);
+		if(!trie_is_bit(key, bit++)) printf("left"), n1 = ++n0 + left;
+		else printf("right"), n0 += left + 1, i += left + 1;
+		printf(" at %lu\n", bit);
+	}
+	assert(n0 == n1 && i < t->leaves.size);
+	if(!(new_key = leaf_new(output))) return 0;
+	*new_key = t->leaves.data[i];
+	for(d = 0; d < depth; d++) fputc('\t', stdout);
+	printf("} %c found \"%s\"\n", depth, *new_key);
+	return 1;
+}
+
+/** @return True unless error. */
+static int trie_suggest(const struct Trie *const t, const char *const key,
+	unsigned edit_limit, struct LeafArray *const output) {
+	assert(t && key && output);
+	if(!t->leaves.size) return 1;
+	suggest_r(t, key, output, edit_limit, 0, t->leaves.size - 1, 0, 0, 0);
+	return 1;
 }
 
 
@@ -506,7 +585,7 @@ static void trie_print(const struct Trie *const t) {
 	printf("}.\n");
 }
 
-/** Given `n` in `t` branches, caluculate the right child branches. Used in
+/** Given `n` in `t` branches, calculate the right child branches. Used in
  <fn:trie_graph>. @order \O(log `size`) */
 static size_t trie_right(const struct Trie *const t, const size_t n) {
 	size_t remaining = t->branches.size, n0 = 0, left, right;
@@ -652,8 +731,8 @@ int main(void) {
 "skrieghs","smouldry","crower","pellicles","sapucaias","underuses","reexplored",
 "chlamydia","tragediennes","levator","accipiter","esquisses","intentnesses",
 "julienning","tetched","creeshing","anaphrodisiacs","insecurities","tarpons",
-"lipotropins","sinkage","slooshes","homoplastic","feateous"
-	}, *const extra[] = { "foo", "bar", "baz", "qux", "quxx", "a" };
+"lipotropins","sinkage","slooshes","homoplastic","feateous"},
+		*const extra[] = { "foo", "bar", "baz", "qux", "quxx", "a" };
 	const size_t words_size = sizeof words / sizeof *words,
 		extra_size = sizeof extra / sizeof *extra;
 	size_t start, end, i;
@@ -661,6 +740,9 @@ int main(void) {
 	TrieLeaf leaf, eject;
 	const TrieLeaf word_in = "lambda", word_out = "slithern",
 		prefix_in = "pe", prefix_out = "qz";
+	TrieLeaf word;
+	unsigned edit;
+	struct LeafArray suggest = { 0, 0, 0 };
 	int success = EXIT_FAILURE;
 	if(!trie_init(&t, words, words_size, 0)) goto catch;
 
@@ -735,11 +817,61 @@ int main(void) {
 		assert(!leaf);
 	}
 
+	word = "ainsertion", edit = 1;
+	if(!trie_suggest(&t, word, edit, &suggest)) goto catch;
+	printf("suggest(\"%s\", %u):", word, edit);
+	for(i = 0; i < suggest.size; i++) printf(" %s", suggest.data[i]);
+	leaf_clear(&suggest);
+	printf("\n");
+	printf("Subset of?\n");
+	printf("%s\n", index_get(&t, "insertion"));
+	printf("%s\n", index_get(&t, "ansertion"));
+	printf("%s\n", index_get(&t, "aisertion"));
+	printf("%s\n", index_get(&t, "ainertion"));
+	printf("%s\n", index_get(&t, "ainsrtion"));
+	printf("%s\n", index_get(&t, "ainsetion"));
+	printf("%s\n", index_get(&t, "ainserion"));
+	printf("%s\n", index_get(&t, "ainserton"));
+	printf("%s\n", index_get(&t, "ainsertin"));
+	printf("%s\n", index_get(&t, "ainsertio"));
+	printf("%s\n", index_get(&t, "ainsertion"));
+
+	trie_(&t);
+	if(!trie_init(&t, extra, extra_size, 0)) goto catch;
+	trie_print(&t);
+	trie_graph(&t, "graph/trie-extra.gv");
+
+	word = "fbar", edit = 2;
+	if(!trie_suggest(&t, word, edit, &suggest)) goto catch;
+	printf("suggest(\"%s\", %u):", word, edit);
+	for(i = 0; i < suggest.size; i++) printf(" %s", suggest.data[i]);
+	leaf_clear(&suggest);
+	printf("\n");
+	printf("Subset of?\n");
+	printf("%s\n", index_get(&t, "ar"));
+	printf("%s\n", index_get(&t, "br"));
+	printf("%s\n", index_get(&t, "ba"));
+	printf("%s\n", index_get(&t, "bar"));
+	printf("%s\n", index_get(&t, "ar"));
+	printf("%s\n", index_get(&t, "fr"));
+	printf("%s\n", index_get(&t, "fa"));
+	printf("%s\n", index_get(&t, "far"));
+	printf("%s\n", index_get(&t, "br"));
+	printf("%s\n", index_get(&t, "fr"));
+	printf("%s\n", index_get(&t, "fb"));
+	printf("%s\n", index_get(&t, "fbr"));
+	printf("%s\n", index_get(&t, "ba"));
+	printf("%s\n", index_get(&t, "fa"));
+	printf("%s\n", index_get(&t, "fb"));
+	printf("%s\n", index_get(&t, "fba"));
+	printf("%s\n", index_get(&t, "fbar"));
+	
 	success = EXIT_SUCCESS;
 	goto finally;
 catch:
 	perror("trie");
 finally:
 	trie_(&t);
+	leaf_array_(&suggest);
 	return success;
 }
