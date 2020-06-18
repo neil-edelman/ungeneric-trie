@@ -510,50 +510,64 @@ static int trie_remove(struct Trie *const t, const char *const key) {
 	struct LeafArray *output;
 };*/
 
+static unsigned max_edit;
+
+static const char *depth2str(const unsigned edit) {
+	static char buffer[64];
+	unsigned depth, d;
+	assert(max_edit < sizeof buffer - 1 && edit <= max_edit);
+	depth = max_edit - edit;
+	for(d = 0; d < depth; d++) buffer[d] = '\t';
+	buffer[depth] = '\0';
+	return buffer;
+}
+
 /** Breath-first-search `t` for `edit` Levenshtein edits away from `key` and
  appends `output`. @order I don't know. */
 static int suggest_r(const struct Trie *const t, const char *key,
 	struct LeafArray *const output, const unsigned edit,
-	size_t n0, size_t n1, size_t i, size_t bit,
-	const unsigned depth) {
-	size_t left;
+	size_t n0, size_t n1, size_t i, size_t bit) {
 	TrieBranch branch;
-	size_t byte, key_byte = bit >> 3, start_byte = key_byte, future_bit;
+	size_t byte, key_byte = bit >> 3, delete_byte = key_byte, future_bit;
+	size_t left, left_child, right_child;
 	TrieLeaf *new_key;
-	unsigned d;
 	assert(t && key && output && n0 <= n1 && n1 < t->leaves.size);
-	for(d = 0; d < depth; d++) fputc('\t', stdout);
-	printf("{ \"%s\" edit %u, n=[%lu, %lu], i=%lu, bit=%lu\n",
-		key, edit, n0, n1, i, bit);
+	printf("%s{ \"%s\" edit %u, n=[%lu, %lu], i=%lu, bit=%lu\n",
+		depth2str(edit), key, edit, n0, n1, i, bit);
 
 	/* BFS limit of `edit`; first edit. */
 	if(edit && key[0] != '\0') /* Deletion. */
-		suggest_r(t, key + 1, output, edit - 1, n0, n1, i, bit, depth + 1);
+		suggest_r(t, key + 1, output, edit - 1, n0, n1, i, bit);
 
 	while(n0 < n1) {
 		branch = t->branches.data[n0];
 		future_bit = bit + trie_skip(branch);
 		/* `key` ends at an internal branch; NUL-terminator is part of `key`. */
 		for(byte = future_bit >> 3; key_byte < byte; key_byte++)
-			if(key[key_byte] == '\0') { for(d = 0; d < depth + 1; d++) fputc('\t', stdout); printf("internal node\n"); return 1; }
+			if(key[key_byte] == '\0') { printf("%sinternal node\n", depth2str(edit)); return 1; }
 
-		/* BFS, subsequent edits only if we are on the next byte. */
-		if(edit && start_byte < key_byte) /* Deletion. */
-			start_byte = key_byte,
-			suggest_r(t, key + 1, output, edit - 1, n0, n1, i, bit, depth + 1);
+		/* Delete BFS, subsequent edits only if we are on the next byte. */
+		if(edit && delete_byte < key_byte) delete_byte = key_byte,
+			suggest_r(t, key + 1, output, edit - 1, n0, n1, i, bit);
 
 		bit = future_bit;
 		left = trie_left(branch);
-		for(d = 0; d < depth + 1; d++) fputc('\t', stdout);
-		if(!trie_is_bit(key, bit++)) printf("left"), n1 = ++n0 + left;
-		else printf("right"), n0 += left + 1, i += left + 1;
+		left_child = n0 + 1;
+		right_child = left_child + left;
+		printf("%s", depth2str(edit));
+		if(!trie_is_bit(key, bit++)) {
+			/*if(edit && !);*/
+			
+			printf("left"), n0 = left_child, n1 = right_child;
+		} else {
+			printf("right"), n0 = right_child, i += left + 1;
+		}
 		printf(" at %lu\n", bit);
 	}
 	assert(n0 == n1 && i < t->leaves.size);
 	if(!(new_key = leaf_new(output))) return 0;
 	*new_key = t->leaves.data[i];
-	for(d = 0; d < depth; d++) fputc('\t', stdout);
-	printf("} %c found \"%s\"\n", depth, *new_key);
+	printf("%s} found \"%s\"\n", depth2str(edit), *new_key);
 	return 1;
 }
 
@@ -562,7 +576,8 @@ static int trie_suggest(const struct Trie *const t, const char *const key,
 	unsigned edit_limit, struct LeafArray *const output) {
 	assert(t && key && output);
 	if(!t->leaves.size) return 1;
-	suggest_r(t, key, output, edit_limit, 0, t->leaves.size - 1, 0, 0, 0);
+	max_edit = edit_limit; /* Debug print global. */
+	suggest_r(t, key, output, edit_limit, 0, t->leaves.size - 1, 0, 0);
 	return 1;
 }
 
