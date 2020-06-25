@@ -23,6 +23,7 @@ typedef int (*TrieBipredicate)(TrieLeaf, TrieLeaf);
 static int vstrcmp(const void *const a, const void *const b)
 	{ return strcmp(*(char **)a, *(char **)b); }
 
+/** A dynamic array of leaves. */
 struct LeafArray { TrieLeaf *data; size_t size, capacity; };
 
 /** Initialises `a` to idle. */
@@ -33,8 +34,7 @@ static void leaf_array(struct LeafArray *const a)
 static void leaf_array_(struct LeafArray *const a)
 	{ assert(a), free(a->data), leaf_array(a); }
 
-/** Ensures `min_capacity` of `a`.
- @param[min_capacity] If zero, does nothing.
+/** Ensures `min_capacity` of `a`. @param[min_capacity] If zero, does nothing.
  @return Success; otherwise, `errno` will be set.
  @throws[ERANGE] Tried allocating more then can fit in `size_t` or `realloc`
  doesn't follow POSIX. @throws[realloc] */
@@ -55,7 +55,7 @@ static int leaf_reserve(struct LeafArray *const a, const size_t min_capacity) {
 	/* `c_n = a1.625^n`, approximation golden ratio `\phi ~ 1.618`. */
 	while(c0 < min_capacity) {
 		size_t c1 = c0 + (c0 >> 1) + (c0 >> 3);
-		if(c0 >= c1) { c0 = max_size; break; } /* Overflow; very unlikely. */
+		if(c0 >= c1) { c0 = max_size; break; }
 		c0 = c1;
 	}
 	if(!(data = realloc(a->data, sizeof *a->data * c0)))
@@ -102,17 +102,19 @@ static void leaf_compactify(struct LeafArray *const a,
 	a->size = target;
 }
 
-/** Clears `a` but leaves the memory. */
+/** Clears `a` but leaves the memory. @order \O(1) */
 static void leaf_clear(struct LeafArray *const a) { assert(a); a->size = 0; }
 
 
-/* Trie internal nodes encode the branches semi-implicitly. Each contains two
- items of information in a `size_t`: left children branches are <fn:trie_left>
- immediately following, right children are the rest; <fn:trie_skip>, the length
- of the string trie branch in bytes beyond the first byte, don't care values
- for the index. */
+
+/* Each contains two items of information in a `size_t`: left children branches
+ are <fn:trie_left> immediately following, right children are the rest, and
+ <fn:trie_skip>, the length in bits of the don't care values preceding this
+ branch in the string. */
 typedef size_t TrieBranch;
 
+/** A vector that serves as trie pre-order internal nodes,
+ <Morrison, 1968 PATRICiA> semi-implicitly. */
 struct BranchArray { TrieBranch *data; size_t size, capacity; };
 
 /** Initialises `a` to idle. */
@@ -123,7 +125,7 @@ static void branch_array(struct BranchArray *const a)
 static void branch_array_(struct BranchArray *const a)
 	{ assert(a), free(a->data), branch_array(a); }
 
-/** Ensures `min_capacity` of `a`. @return Success. */
+/** Ensures `min_capacity` of `a`. @return Success. @throws[realloc, ERANGE] */
 static int branch_reserve(struct BranchArray *const a,
 	const size_t min_capacity) {
 	size_t c0;
@@ -150,7 +152,7 @@ static int branch_reserve(struct BranchArray *const a,
 	return 1;
 }
 
-/** Returns a new un-initialized datum of `a`. */
+/** Returns a new un-initialized datum of `a`. @throws[realloc, ERANGE] */
 static TrieBranch *branch_new(struct BranchArray *const a) {
 	assert(a); return branch_reserve(a, a->size + 1) ? a->data + a->size++ : 0;
 }
@@ -216,6 +218,7 @@ static int trie_is_prefix(const char *a, const char *b) {
 		if(*a != *b) return *b == '\0';
 	}
 }
+
 
 
 /** Trie is a full binary tree, `|branches| + 1 = |leaves|`. */
@@ -492,6 +495,63 @@ static int trie_remove(struct Trie *const t, const char *const key) {
 }
 
 
+
+/* This normally would be in `inttypes.h`, but we are using `C90`. */
+typedef unsigned char uint8_t;
+
+/** Wagner-Fischer requires memory for dynamic programming. */
+struct ByteArray { uint8_t *data; size_t size, capacity; };
+
+/** Reserves `min_capacity` of `a`. @throws[realloc, ERANGE] */
+static int byte_reserve(struct ByteArray *const a, const size_t min_capacity) {
+	size_t c0;
+	uint8_t *data;
+	const size_t max_size = (size_t)-1 / sizeof *a->data;
+	assert(a);
+	if(a->data) {
+		if(min_capacity <= a->capacity) return 1;
+		c0 = a->capacity;
+		if(c0 < 8) c0 = 8;
+	} else {
+		if(!min_capacity) return 1;
+		c0 = 8;
+	}
+	if(min_capacity > max_size) return errno = ERANGE, 0;
+	while(c0 < min_capacity) {
+		size_t c1 = c0 + (c0 >> 1) + (c0 >> 3);
+		if(c0 >= c1) { c0 = max_size; break; }
+		c0 = c1;
+	}
+	if(!(data = realloc(a->data, sizeof *a->data * c0)))
+	{ if(!errno) errno = ERANGE; return 0; }
+	a->data = data, a->capacity = c0;
+	return 1;
+}
+
+/** @return A new, un-initialized data at the end of `a`, `length` in size.
+ @throws[realloc, ERANGE] */
+static uint8_t *byte_new(struct ByteArray *const a, const size_t amount) {
+	assert(a && amount <= ((size_t)-1) - a->size);
+	if(byte_reserve(a, a->size + amount)) {
+		a->size += amount; return a->data + a->size - amount;
+	} else {
+		return 0;
+	}
+}
+
+
+
+struct WagnerFischer {
+	const char *query;
+	struct ByteArray buf;
+};
+
+static int first(const struct Trie *const t, struct WagnerFischer *const w) {
+	return 0;
+}
+
+
+
 /* Errors. */
 
 
@@ -501,6 +561,51 @@ static int trie_remove(struct Trie *const t, const char *const key) {
  - Substitution: a -> b
  <Damerau>:
  - transpositions: ab -> ba */
+
+#if 0
+static int bfs_r(const struct Trie *const t, struct LeafArray *const output,
+	const char *const key, const unsigned remaining_edits,
+	size_t n0, size_t n1, size_t i) {
+	TrieBranch branch;
+	assert(t && output && key
+		&& n0 <= n1 && n1 < t->leaves.size && i < t->leaves.size);
+	while(n0 < n1) {
+		size_t future_bit;
+		branch = t->branches.data[n0];
+		future_bit = bit + trie_skip(branch);
+		for(byte = future_bit >> 3; key_byte < byte; key_byte++)
+			if(key[key_byte] == '\0') { printf("%sinternal node\n", depth2str(edit)); return 1; }
+		
+		/* Delete BFS, subsequent edits only if we are on the next byte. */
+		if(edit && delete_byte < key_byte) delete_byte = key_byte,
+			suggest_r(t, key + 1, output, edit - 1, n0, n1, i, bit);
+		
+		bit = future_bit;
+		left = trie_left(branch);
+		left_child = n0 + 1;
+		right_child = left_child + left;
+		if(!trie_is_bit(key, bit++)) {
+			int is_already = subs_byte == key_byte;
+			printf("%sleft at %lu\n", depth2str(edit), bit);
+			if(edit || is_already) suggest_r(t, key, output, edit - !is_already, right_child, n1, i, bit), subs_byte = key_byte;
+			n0 = left_child, n1 = right_child;
+		} else {
+			int is_already = subs_byte == key_byte;
+			printf("%sright at %lu\n", depth2str(edit), bit);
+			if(edit || is_already) suggest_r(t, key, output, edit - !is_already, right_child, n1, i, bit), subs_byte = key_byte;
+			n0 = right_child, i += left + 1;
+		}
+	}
+	assert(n0 == n1 && i < t->leaves.size);
+	if(!(new_key = leaf_new(output))) return 0;
+	*new_key = t->leaves.data[i];
+	printf("%sfound \"%s\" }\n", depth2str(edit), *new_key);
+	return 1;
+}
+#endif
+
+
+
 
 /*struct TriePosition {
 	const struct Trie *t;
@@ -528,7 +633,7 @@ static int suggest_r(const struct Trie *const t, const char *key,
 	struct LeafArray *const output, const unsigned edit,
 	size_t n0, size_t n1, size_t i, size_t bit) {
 	TrieBranch branch;
-	size_t byte, key_byte = bit >> 3, delete_byte = key_byte, future_bit;
+	size_t byte, key_byte = bit >> 3, delete_byte = key_byte, subs_byte = (size_t)-1, future_bit;
 	size_t left, left_child, right_child;
 	TrieLeaf *new_key;
 	assert(t && key && output && n0 <= n1 && n1 < t->leaves.size);
@@ -554,20 +659,22 @@ static int suggest_r(const struct Trie *const t, const char *key,
 		left = trie_left(branch);
 		left_child = n0 + 1;
 		right_child = left_child + left;
-		printf("%s", depth2str(edit));
 		if(!trie_is_bit(key, bit++)) {
-			/*if(edit && !);*/
-			
-			printf("left"), n0 = left_child, n1 = right_child;
+			int is_already = subs_byte == key_byte;
+			printf("%sleft at %lu\n", depth2str(edit), bit);
+			if(edit || is_already) suggest_r(t, key, output, edit - !is_already, right_child, n1, i, bit), subs_byte = key_byte;
+			n0 = left_child, n1 = right_child;
 		} else {
-			printf("right"), n0 = right_child, i += left + 1;
+			int is_already = subs_byte == key_byte;
+			printf("%sright at %lu\n", depth2str(edit), bit);
+			if(edit || is_already) suggest_r(t, key, output, edit - !is_already, right_child, n1, i, bit), subs_byte = key_byte;
+			n0 = right_child, i += left + 1;
 		}
-		printf(" at %lu\n", bit);
 	}
 	assert(n0 == n1 && i < t->leaves.size);
 	if(!(new_key = leaf_new(output))) return 0;
 	*new_key = t->leaves.data[i];
-	printf("%s} found \"%s\"\n", depth2str(edit), *new_key);
+	printf("%sfound \"%s\" }\n", depth2str(edit), *new_key);
 	return 1;
 }
 
