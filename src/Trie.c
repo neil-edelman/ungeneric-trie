@@ -11,63 +11,74 @@
 #include <string.h> /* memmove memcpy */
 #include <assert.h> /* assert */
 #include <errno.h>  /* errno */
+/* Added in `C99` and doesn't guarantee `uint64_t`; can be replaced with
+ `typedef` these machine-dependant types. */
+#include <stdint.h> /* uint8_t uint64_t */
 
 
-/** Leaves are strings, (for example.) */
-typedef const char *TrieLeaf;
+#define DEFINE_MIN_ARRAY(name, Name, type) \
+/* A dynamic array. */ \
+struct Name##Array { type *data; size_t size, capacity; }; \
+/* Initialises `a` to idle. */ \
+static void name##_array(struct Name##Array *const a) \
+	{ assert(a), a->data = 0, a->capacity = a->size = 0; } \
+/* Destroys `a` and returns it to idle. */ \
+static void name##_array_(struct Name##Array *const a) \
+	{ assert(a), free(a->data), name##_array(a); } \
+/* Ensures `min_capacity` of `a`. @param[min_capacity] If zero, does nothing. \
+@return Success; otherwise, `errno` will be set. \
+@throws[ERANGE] Tried allocating more then can fit in `size_t` or `realloc` \
+doesn't follow POSIX. @throws[realloc, ERANGE] */ \
+static int name##_reserve(struct Name##Array *const a, \
+	const size_t min_capacity) { \
+	size_t c0; \
+	type *data; \
+	const size_t max_size = (size_t)-1 / sizeof *a->data; \
+	assert(a); \
+	if(a->data) { \
+		if(min_capacity <= a->capacity) return 1; \
+		c0 = a->capacity; \
+		if(c0 < 8) c0 = 8; \
+	} else { /* Idle. */ \
+		if(!min_capacity) return 1; \
+		c0 = 8; \
+	} \
+	if(min_capacity > max_size) return errno = ERANGE, 0; \
+	/* `c_n = a1.625^n`, approximation golden ratio `\phi ~ 1.618`. */ \
+	while(c0 < min_capacity) { \
+		size_t c1 = c0 + (c0 >> 1) + (c0 >> 3); \
+		if(c0 >= c1) { c0 = max_size; break; } \
+		c0 = c1; \
+	} \
+	if(!(data = realloc(a->data, sizeof *a->data * c0))) \
+		{ if(!errno) errno = ERANGE; return 0; } \
+	a->data = data, a->capacity = c0; \
+	return 1; \
+} \
+/* @return A new un-initialized datum of `a`. @throws[realloc, ERANGE] */ \
+static type *name##_new(struct Name##Array *const a) { \
+	assert(a); return name##_reserve(a, a->size + 1) ? a->data + a->size++ : 0;\
+} \
+/* Clears `a` but leaves the memory. @order \O(1) */ \
+static void name##_clear(struct Name##Array *const a) \
+	{ assert(a); a->size = 0; } \
+static void name##_unused_coda(void); static void name##_unused(void) { \
+name##_new(0); name##_clear(0); name##_unused_coda(); } \
+static void name##_unused_coda(void) { name##_unused(); }
+#define ARRAY_IDLE { 0, 0, 0 }
 
-/** Returns a boolean given two `TrieLeaf`. */
-typedef int (*TrieBipredicate)(TrieLeaf, TrieLeaf);
+
+/** Leaves are string constants; `typedef` because it could be more complex. */
+typedef const char *Leaf;
+
+/** Returns a boolean given two `Leaf`. */
+typedef int (*TrieBipredicate)(Leaf, Leaf);
 
 /** Orders `a` and `b`. @implements qsort bsearch */
 static int vstrcmp(const void *const a, const void *const b)
 	{ return strcmp(*(char **)a, *(char **)b); }
 
-/** A dynamic array of leaves. */
-struct LeafArray { TrieLeaf *data; size_t size, capacity; };
-
-/** Initialises `a` to idle. */
-static void leaf_array(struct LeafArray *const a)
-	{ assert(a), a->data = 0, a->capacity = a->size = 0; }
-
-/** Destroys `a` and returns it to idle. */
-static void leaf_array_(struct LeafArray *const a)
-	{ assert(a), free(a->data), leaf_array(a); }
-
-/** Ensures `min_capacity` of `a`. @param[min_capacity] If zero, does nothing.
- @return Success; otherwise, `errno` will be set.
- @throws[ERANGE] Tried allocating more then can fit in `size_t` or `realloc`
- doesn't follow POSIX. @throws[realloc] */
-static int leaf_reserve(struct LeafArray *const a, const size_t min_capacity) {
-	size_t c0;
-	TrieLeaf *data;
-	const size_t max_size = (size_t)-1 / sizeof *a->data;
-	assert(a);
-	if(a->data) {
-		if(min_capacity <= a->capacity) return 1;
-		c0 = a->capacity;
-		if(c0 < 8) c0 = 8;
-	} else { /* Idle. */
-		if(!min_capacity) return 1;
-		c0 = 8;
-	}
-	if(min_capacity > max_size) return errno = ERANGE, 0;
-	/* `c_n = a1.625^n`, approximation golden ratio `\phi ~ 1.618`. */
-	while(c0 < min_capacity) {
-		size_t c1 = c0 + (c0 >> 1) + (c0 >> 3);
-		if(c0 >= c1) { c0 = max_size; break; }
-		c0 = c1;
-	}
-	if(!(data = realloc(a->data, sizeof *a->data * c0)))
-		{ if(!errno) errno = ERANGE; return 0; }
-	a->data = data, a->capacity = c0;
-	return 1;
-}
-
-/** @return A new un-initialized datum of `a`. @throws[realloc, ERANGE] */
-static TrieLeaf *leaf_new(struct LeafArray *const a) {
-	assert(a); return leaf_reserve(a, a->size + 1) ? a->data + a->size++ : 0;
-}
+DEFINE_MIN_ARRAY(leaf, Leaf, Leaf)
 
 /** For each consecutive pair of equal elements in `a`, surjects two one
  according to `merge`.
@@ -102,60 +113,15 @@ static void leaf_compactify(struct LeafArray *const a,
 	a->size = target;
 }
 
-/** Clears `a` but leaves the memory. @order \O(1) */
-static void leaf_clear(struct LeafArray *const a) { assert(a); a->size = 0; }
 
+/** Trie pre-order internal nodes in the style of <Morrison, 1968 PATRICiA>
+ semi-implicitly. Each contains two items of information in a `size_t`: left
+ children branches are <fn:trie_left> immediately following, right children are
+ the rest, and <fn:trie_skip>, the length in bits of the don't care values
+ preceding this branch in the string. */
+typedef size_t Branch;
 
-
-/* Each contains two items of information in a `size_t`: left children branches
- are <fn:trie_left> immediately following, right children are the rest, and
- <fn:trie_skip>, the length in bits of the don't care values preceding this
- branch in the string. */
-typedef size_t TrieBranch;
-
-/** A vector that serves as trie pre-order internal nodes,
- <Morrison, 1968 PATRICiA> semi-implicitly. */
-struct BranchArray { TrieBranch *data; size_t size, capacity; };
-
-/** Initialises `a` to idle. */
-static void branch_array(struct BranchArray *const a)
-	{ assert(a), a->data = 0, a->capacity = a->size = 0; }
-
-/** Destroys `a` and returns it to idle. */
-static void branch_array_(struct BranchArray *const a)
-	{ assert(a), free(a->data), branch_array(a); }
-
-/** Ensures `min_capacity` of `a`. @return Success. @throws[realloc, ERANGE] */
-static int branch_reserve(struct BranchArray *const a,
-	const size_t min_capacity) {
-	size_t c0;
-	TrieBranch *data;
-	const size_t max_size = (size_t)-1 / sizeof *a->data;
-	assert(a);
-	if(a->data) {
-		if(min_capacity <= a->capacity) return 1;
-		c0 = a->capacity;
-		if(c0 < 8) c0 = 8;
-	} else {
-		if(!min_capacity) return 1;
-		c0 = 8;
-	}
-	if(min_capacity > max_size) return errno = ERANGE, 0;
-	while(c0 < min_capacity) {
-		size_t c1 = c0 + (c0 >> 1) + (c0 >> 3);
-		if(c0 >= c1) { c0 = max_size; break; }
-		c0 = c1;
-	}
-	if(!(data = realloc(a->data, sizeof *a->data * c0)))
-		{ if(!errno) errno = ERANGE; return 0; }
-	a->data = data, a->capacity = c0;
-	return 1;
-}
-
-/** Returns a new un-initialized datum of `a`. @throws[realloc, ERANGE] */
-static TrieBranch *branch_new(struct BranchArray *const a) {
-	assert(a); return branch_reserve(a, a->size + 1) ? a->data + a->size++ : 0;
-}
+DEFINE_MIN_ARRAY(branch, Branch, Branch)
 
 /* 12 makes the maximum skip length 511 bytes and the maximum size of a trie is
  `size_t` 64-bits: 4503599627370495, 32-bits: 1048575, and 16-bits: 15. */
@@ -164,17 +130,17 @@ static TrieBranch *branch_new(struct BranchArray *const a) {
 #define TRIE_LEFT_MAX (((size_t)1 << ((sizeof(size_t) << 3) - TRIE_SKIP)) - 1)
 
 /** @return Packs `skip` and `left` into a branch. */
-static TrieBranch trie_branch(const size_t skip, const size_t left) {
+static Branch trie_branch(const size_t skip, const size_t left) {
 	assert(skip <= TRIE_SKIP_MAX && left <= TRIE_LEFT_MAX);
 	return skip + (left << TRIE_SKIP);
 }
 
 /** @return Unpacks skip from `branch`. */
-static size_t trie_skip(const TrieBranch branch)
+static size_t trie_skip(const Branch branch)
 	{ return branch & TRIE_SKIP_MAX; }
 
 /** @return Unpacks left descendent branches from `branch`. */
-static size_t trie_left(const TrieBranch branch) { return branch >> TRIE_SKIP; }
+static size_t trie_left(const Branch branch) { return branch >> TRIE_SKIP; }
 
 /** Overwrites `skip` in `branch`. */
 static void trie_skip_set(size_t *const branch, size_t skip) {
@@ -220,8 +186,8 @@ static int trie_is_prefix(const char *a, const char *b) {
 }
 
 
-
-/** Trie is a full binary tree, `|branches| + 1 = |leaves|`. */
+/** Trie is a full binary tree, it's either empty or
+ `|branches| + 1 = |leaves|`. */
 struct Trie { struct BranchArray branches; struct LeafArray leaves; };
 
 /** Initialises `t` to idle. */
@@ -239,7 +205,7 @@ static void trie_init_branches_r(struct Trie *const t, size_t bit,
 	const size_t a, const size_t a_size) {
 	size_t b = a, b_size = a_size, half;
 	size_t skip = 0;
-	TrieBranch *branch;
+	Branch *branch;
 	assert(t && a_size && a_size <= t->leaves.size && t->leaves.size
 		&& t->branches.capacity >= t->leaves.size - 1);
 	if(a_size <= 1) return;
@@ -263,10 +229,10 @@ static void trie_init_branches_r(struct Trie *const t, size_t bit,
 /** Initialises `t` to `a` of size `a_size`, which cannot be zero.
  @param[merge] Called with any duplicate entries and replaces if true; if
  null, doesn't replace. @return Success. @throws[ERANGE, malloc]
- @fixme I hear that there's a better way to do this in the literature. */
-static int trie_init(struct Trie *const t, const TrieLeaf *const a,
+ @fixme There's a better way to do this in the literature? */
+static int trie_init(struct Trie *const t, const Leaf *const a,
 	const size_t a_size, const TrieBipredicate merge) {
-	TrieLeaf *leaves;
+	Leaf *leaves;
 	assert(t && a && a_size);
 	trie(t);
 	/* This will store space for all of the duplicates, as well. */
@@ -293,7 +259,7 @@ static int param_index_get(const struct Trie *const t, const char *const key,
 	 descendant branches. `i` is the leaf index. `left` is all ancestor's left
 	 branches. */
 	size_t n0 = 0, n1 = t->branches.size, i = 0, left;
-	TrieBranch ancestor;
+	Branch ancestor;
 	size_t byte, key_byte = 0, bit = 0;
 	assert(t && key && result);
 	if(!t->leaves.size) return assert(!n1), 0; /* Empty tree. */
@@ -324,13 +290,13 @@ static int param_get(const struct Trie *const t,
 /** @return `t` entry that matches trie bits of `key`, (ignoring the don't care
  bits,) or null if either `key` didn't have the length to fully differentiate
  more then one entry or the `trie` is empty. */
-static TrieLeaf index_get(const struct Trie *const t, const char *const key) {
+static Leaf index_get(const struct Trie *const t, const char *const key) {
 	size_t i;
 	return param_index_get(t, key, &i) ? t->leaves.data[i] : 0;
 }
 
 /** @return Exact match for `key` in `t` or null. */
-static TrieLeaf trie_get(const struct Trie *const t, const char *const key) {
+static Leaf trie_get(const struct Trie *const t, const char *const key) {
 	size_t i;
 	return param_get(t, key, &i) ? t->leaves.data[i] : 0;
 }
@@ -341,7 +307,7 @@ static TrieLeaf trie_get(const struct Trie *const t, const char *const key) {
 static void index_prefix(const struct Trie *const t, const char *const prefix,
 	size_t *const low, size_t *const high) {
 	size_t n0 = 0, n1 = t->branches.size, i = 0, left;
-	TrieBranch branch;
+	Branch branch;
 	size_t byte, key_byte = 0, bit = 0;
 	assert(t && prefix && low && high);
 	assert(n1 + 1 == t->leaves.size); /* Full binary tree. */
@@ -376,12 +342,12 @@ static int trie_prefix(const struct Trie *const t, const char *const prefix,
  where the pointer is 64-bits, is 4.5T. On 32-bits, it's 1M.
  @throws[realloc, ERANGE] @fixme Throw EILSEQ if two strings have subsequences
  that are equal in more than 2^12 bits. */
-static int trie_add(struct Trie *const t, TrieLeaf datum) {
+static int trie_add_unique(struct Trie *const t, Leaf datum) {
 	const size_t leaf_size = t->leaves.size, branch_size = leaf_size - 1;
 	size_t n0 = 0, n1 = branch_size, i = 0, left, bit = 0, bit0 = 0, bit1;
-	TrieBranch *branch = 0;
+	Branch *branch = 0;
 	const char *n0_key;
-	TrieLeaf *leaf;
+	Leaf *leaf;
 	int cmp;
 	assert(t && datum);
 	/* Empty special case. */
@@ -432,15 +398,15 @@ insert:
  @param[eject] If not-null, the ejected datum. If `replace` returns false, then
  `*eject == datum`, but it will still return true.
  @return Success. @throws[realloc, ERANGE] */
-static int trie_put(struct Trie *const t, TrieLeaf datum,
-	TrieLeaf *const eject, const TrieBipredicate replace) {
-	TrieLeaf *match;
+static int trie_put(struct Trie *const t, Leaf datum,
+	Leaf *const eject, const TrieBipredicate replace) {
+	Leaf *match;
 	size_t i;
 	assert(t && datum);
 	/* Add if absent. */
 	if(!param_get(t, datum, &i)) {
 		if(eject) *eject = 0;
-		return trie_add(t, datum);
+		return trie_add_unique(t, datum);
 	}
 	assert(i < t->leaves.size), match = t->leaves.data + i;
 	/* Collision policy. */
@@ -495,61 +461,46 @@ static int trie_remove(struct Trie *const t, const char *const key) {
 }
 
 
-
-/* This normally would be in `inttypes.h`, but we are using `C90`. */
-typedef unsigned char uint8_t;
-
-/** Wagner-Fischer requires memory for dynamic programming. */
-struct ByteArray { uint8_t *data; size_t size, capacity; };
-
-/** Reserves `min_capacity` of `a`. @throws[realloc, ERANGE] */
-static int byte_reserve(struct ByteArray *const a, const size_t min_capacity) {
-	size_t c0;
-	uint8_t *data;
-	const size_t max_size = (size_t)-1 / sizeof *a->data;
-	assert(a);
-	if(a->data) {
-		if(min_capacity <= a->capacity) return 1;
-		c0 = a->capacity;
-		if(c0 < 8) c0 = 8;
-	} else {
-		if(!min_capacity) return 1;
-		c0 = 8;
-	}
-	if(min_capacity > max_size) return errno = ERANGE, 0;
-	while(c0 < min_capacity) {
-		size_t c1 = c0 + (c0 >> 1) + (c0 >> 3);
-		if(c0 >= c1) { c0 = max_size; break; }
-		c0 = c1;
-	}
-	if(!(data = realloc(a->data, sizeof *a->data * c0)))
-	{ if(!errno) errno = ERANGE; return 0; }
-	a->data = data, a->capacity = c0;
-	return 1;
-}
+/* Memory for dynamic programming. */
+DEFINE_MIN_ARRAY(byte, Byte, uint8_t)
 
 /** @return A new, un-initialized data at the end of `a`, `length` in size.
  @throws[realloc, ERANGE] */
-static uint8_t *byte_new(struct ByteArray *const a, const size_t amount) {
-	assert(a && amount <= ((size_t)-1) - a->size);
-	if(byte_reserve(a, a->size + amount)) {
-		a->size += amount; return a->data + a->size - amount;
+static uint8_t *byte_new_amount(struct ByteArray *const a,
+	const size_t length) {
+	assert(a && length <= ((size_t)-1) - a->size);
+	if(byte_reserve(a, a->size + length)) {
+		a->size += length; return a->data + a->size - length;
 	} else {
 		return 0;
 	}
 }
 
+/** Deletes `amount` from the end. */
+static void byte_delete_amount(struct ByteArray *const a, const size_t length)
+	{ assert(a && length <= a->size); a->size -= length; }
 
 
-struct WagnerFischer {
+/** This saves the position in the trie. */
+struct Entry { size_t n0, n1, i, bit; };
+
+DEFINE_MIN_ARRAY(entry, Entry, struct Entry)
+
+static void entry_delete(struct EntryArray *const a)
+	{ assert(a && a->size); a->size--; }
+
+
+struct {
 	const char *query;
-	struct ByteArray buf;
-};
+	size_t query_length;
+	struct ByteArray bytes;
+	struct EntryArray entries;
+} wagner_fischer;
 
-static int first(const struct Trie *const t, struct WagnerFischer *const w) {
-	return 0;
+static void wagner_fischer_(void) {
+	byte_array_(&wagner_fischer.bytes);
+	entry_array_(&wagner_fischer.entries);
 }
-
 
 
 /* Errors. */
@@ -566,7 +517,7 @@ static int first(const struct Trie *const t, struct WagnerFischer *const w) {
 static int bfs_r(const struct Trie *const t, struct LeafArray *const output,
 	const char *const key, const unsigned remaining_edits,
 	size_t n0, size_t n1, size_t i) {
-	TrieBranch branch;
+	Branch branch;
 	assert(t && output && key
 		&& n0 <= n1 && n1 < t->leaves.size && i < t->leaves.size);
 	while(n0 < n1) {
@@ -632,10 +583,10 @@ static const char *depth2str(const unsigned edit) {
 static int suggest_r(const struct Trie *const t, const char *key,
 	struct LeafArray *const output, const unsigned edit,
 	size_t n0, size_t n1, size_t i, size_t bit) {
-	TrieBranch branch;
+	Branch branch;
 	size_t byte, key_byte = bit >> 3, delete_byte = key_byte, subs_byte = (size_t)-1, future_bit;
 	size_t left, left_child, right_child;
-	TrieLeaf *new_key;
+	Leaf *new_key;
 	assert(t && key && output && n0 <= n1 && n1 < t->leaves.size);
 	printf("%s{ \"%s\" edit %u, n=[%lu, %lu], i=%lu, bit=%lu\n",
 		depth2str(edit), key, edit, n0, n1, i, bit);
@@ -859,12 +810,12 @@ int main(void) {
 		extra_size = sizeof extra / sizeof *extra;
 	size_t start, end, i;
 	struct Trie t;
-	TrieLeaf leaf, eject;
-	const TrieLeaf word_in = "lambda", word_out = "slithern",
+	Leaf leaf, eject;
+	const Leaf word_in = "lambda", word_out = "slithern",
 		prefix_in = "pe", prefix_out = "qz";
-	TrieLeaf word;
+	Leaf word;
 	unsigned edit;
-	struct LeafArray suggest = { 0, 0, 0 };
+	struct LeafArray suggest = ARRAY_IDLE;
 	int success = EXIT_FAILURE;
 	if(!trie_init(&t, words, words_size, 0)) goto catch;
 
@@ -995,5 +946,6 @@ catch:
 finally:
 	trie_(&t);
 	leaf_array_(&suggest);
+	wagner_fischer_();
 	return success;
 }
