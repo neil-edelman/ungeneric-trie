@@ -29,7 +29,7 @@ static void name##_array_(struct Name##Array *const a) \
 @return Success; otherwise, `errno` will be set. \
 @throws[ERANGE] Tried allocating more then can fit in `size_t` or `realloc` \
 doesn't follow POSIX. @throws[realloc, ERANGE] */ \
-static int name##_reserve(struct Name##Array *const a, \
+static int name##_array_reserve(struct Name##Array *const a, \
 	const size_t min_capacity) { \
 	size_t c0; \
 	type *data; \
@@ -56,15 +56,17 @@ static int name##_reserve(struct Name##Array *const a, \
 	return 1; \
 } \
 /* @return A new un-initialized datum of `a`. @throws[realloc, ERANGE] */ \
-static type *name##_new(struct Name##Array *const a) { \
-	assert(a); return name##_reserve(a, a->size + 1) ? a->data + a->size++ : 0;\
+static type *name##_array_new(struct Name##Array *const a) { \
+	assert(a); \
+	return name##_array_reserve(a, a->size + 1) ? a->data + a->size++ : 0; \
 } \
 /* Clears `a` but leaves the memory. @order \O(1) */ \
-static void name##_clear(struct Name##Array *const a) \
+static void name##_array_clear(struct Name##Array *const a) \
 	{ assert(a); a->size = 0; } \
-static void name##_unused_coda(void); static void name##_unused(void) { \
-name##_new(0); name##_clear(0); name##_unused_coda(); } \
-static void name##_unused_coda(void) { name##_unused(); }
+static void name##_array_unused_coda(void); \
+static void name##_array_unused(void) { \
+name##_array_new(0); name##_array_clear(0); name##_array_unused_coda(); } \
+static void name##_array_unused_coda(void) { name##_array_unused(); }
 #define ARRAY_IDLE { 0, 0, 0 }
 
 
@@ -123,7 +125,7 @@ typedef size_t Branch;
 
 DEFINE_MIN_ARRAY(branch, Branch, Branch)
 
-/* 12 makes the maximum skip length 511 bytes and the maximum size of a trie is
+/* 12 makes the maximum skip length 512 bytes and the maximum size of a trie is
  `size_t` 64-bits: 4503599627370495, 32-bits: 1048575, and 16-bits: 15. */
 #define TRIE_SKIP 12
 #define TRIE_SKIP_MAX ((1 << TRIE_SKIP) - 1)
@@ -170,7 +172,7 @@ static int trie_strcmp_bit(const char *const a, const char *const b,
 	return !(b[byte] & mask) - !(a[byte] & mask);
 }
 
-/** From string `a`, extract `bit`. */
+/** From string `a`, extract `bit`, either 0 or 1. */
 static int trie_is_bit(const char *const a, const size_t bit) {
 	const size_t byte = bit >> 3, mask = 128 >> (bit & 7);
 	return !!(a[byte] & mask);
@@ -219,7 +221,7 @@ static void trie_init_branches_r(struct Trie *const t, size_t bit,
 		? b_size = half : (half++, b += half, b_size -= half);
 	b_size = b - a;
 	/* Should have space for all branches pre-allocated in <fn:<PN>init>. */
-	branch = branch_new(&t->branches), assert(branch);
+	branch = branch_array_new(&t->branches), assert(branch);
 	*branch = trie_branch(skip, b_size - 1);
 	bit++;
 	trie_init_branches_r(t, bit, a, b_size);
@@ -236,8 +238,8 @@ static int trie_init(struct Trie *const t, const Leaf *const a,
 	assert(t && a && a_size);
 	trie(t);
 	/* This will store space for all of the duplicates, as well. */
-	if(!leaf_reserve(&t->leaves, a_size)
-		|| !branch_reserve(&t->branches, a_size - 1)) return 0;
+	if(!leaf_array_reserve(&t->leaves, a_size)
+		|| !branch_array_reserve(&t->branches, a_size - 1)) return 0;
 	leaves = t->leaves.data;
 	memcpy(leaves, a, sizeof *a * a_size);
 	t->leaves.size = a_size;
@@ -352,13 +354,13 @@ static int trie_add_unique(struct Trie *const t, Leaf datum) {
 	assert(t && datum);
 	/* Empty special case. */
 	if(!leaf_size) return assert(!t->branches.size),
-		(leaf = leaf_new(&t->leaves)) ? *leaf = datum, 1 : 0;
+		(leaf = leaf_array_new(&t->leaves)) ? *leaf = datum, 1 : 0;
 	/* Redundant `size_t`, but maybe we will use it like Judy. */
 	assert(leaf_size == branch_size + 1);
 	/* Conservative maximally unbalanced trie. Reserve one more. */
 	if(leaf_size > TRIE_LEFT_MAX) return errno = ERANGE, 0;
-	if(!leaf_reserve(&t->leaves, leaf_size + 1)
-		|| !branch_reserve(&t->branches, branch_size + 1)) return 0;
+	if(!leaf_array_reserve(&t->leaves, leaf_size + 1)
+		|| !branch_array_reserve(&t->branches, branch_size + 1)) return 0;
 	/* Branch from internal node. */
 	while(branch = t->branches.data + n0, n0_key = t->leaves.data[i], n0 < n1) {
 		/* fixme: Detect overflow 12 bits between. */
@@ -461,15 +463,78 @@ static int trie_remove(struct Trie *const t, const char *const key) {
 }
 
 
+/** This saves the position in the trie, bit-by-bit. */
+struct Node { size_t n0, n1, i; enum { LEFT, RIGHT, LEAF } choice; };
+
+DEFINE_MIN_ARRAY(node, Node, struct Node)
+
+static void node_array_delete(struct NodeArray *const a)
+	{ assert(a && a->size); a->size--; }
+
+/** In `t`, which must be non-empty, given a `key`, stores every choice made,
+ only given the index, ignoring don't care bits. If given `key` in `t`, it will
+ find the path to it, and `key` not in `t`, it will find a path to some element
+ in `t`. @order \O(`key.length`) @return Success. */
+static int node_key(const struct Trie *const t, const char *const key,
+	struct NodeArray *const nodes) {
+	size_t n0 = 0, n1 = t->branches.size, i = 0, left, right;
+	Branch branch;
+	size_t byte, key_byte = 0, bit = 0;
+	struct Node *node;
+	printf("node_key %s\n", key);
+	assert(t && key && nodes);
+	node_array_clear(nodes);
+	assert(n1 + 1 == t->leaves.size); /* Full binary tree. */
+	/* Descend the trie normally, storing the nodes. */
+	while((node = node_array_new(nodes))
+		&& (node->n0 = n0, node->n1 = n1, node->i = i, node->choice = LEAF,
+		printf("node_key1 [%lu,%lu]\n", n0, n1),
+		n0 < n1)) {
+		branch = t->branches.data[n0];
+		bit += trie_skip(branch);
+		left = trie_left(branch);
+		/* '\0' is not included for partial match. */
+		for(byte = bit >> 3; key_byte <= byte; key_byte++)
+			if(key[key_byte] == '\0') goto end_key;
+		if(!(node->choice = trie_is_bit(key, bit++))) n1 = ++n0 + left;
+		else n0 += left + 1, i += left + 1;
+	}
+	if(n0 != n1) goto catch;
+	goto finally;
+	/* End of `key` and still in the internal nodes. Instead of calculating all
+	 the paths to find the shortest, greedily take the one with the least
+	 children, (statistically the best choice.) */
+	while((node = node_array_new(nodes))
+		&& (node->n0 = n0, node->n1 = n1, node->i = i, node->choice = LEAF,
+		printf("node_key2 [%lu,%lu]\n", n0, n1),
+		n0 < n1)) {
+		branch = t->branches.data[n0];
+		bit += trie_skip(branch);
+		left = trie_left(branch);
+end_key:
+		assert(n1 > n0 + 1 + left);
+		right = n1 - n0 - 1 - left;
+		if(!(node->choice = right < left)) n1 = ++n0 + left;
+		else n0 += left + 1, i += left + 1;
+	}
+	if(n0 != n1) goto catch;
+	goto finally;
+catch:
+	return assert(n0 < n1 && errno), 0;
+finally:
+	return assert(n0 == n1), 1;
+}
+
+
 /* Memory for dynamic programming. */
 DEFINE_MIN_ARRAY(byte, Byte, uint8_t)
 
 /** @return A new, un-initialized data at the end of `a`, `length` in size.
  @throws[realloc, ERANGE] */
-static uint8_t *byte_new_amount(struct ByteArray *const a,
+static uint8_t *byte_array_new_amount(struct ByteArray *const a,
 	const size_t length) {
 	assert(a && length <= ((size_t)-1) - a->size);
-	if(byte_reserve(a, a->size + length)) {
+	if(byte_array_reserve(a, a->size + length)) {
 		a->size += length; return a->data + a->size - length;
 	} else {
 		return 0;
@@ -477,29 +542,70 @@ static uint8_t *byte_new_amount(struct ByteArray *const a,
 }
 
 /** Deletes `amount` from the end. */
-static void byte_delete_amount(struct ByteArray *const a, const size_t length)
-	{ assert(a && length <= a->size); a->size -= length; }
+static void byte_array_delete_amount(struct ByteArray *const a,
+	const size_t length) { assert(a && length <= a->size); a->size -= length; }
 
 
-/** This saves the position in the trie. */
-struct Entry { size_t n0, n1, i, bit; };
-
-DEFINE_MIN_ARRAY(entry, Entry, struct Entry)
-
-static void entry_delete(struct EntryArray *const a)
-	{ assert(a && a->size); a->size--; }
 
 
-struct {
+
+/** `bytes.size` == `entries.size` * `query_length`. */
+static struct {
+	const struct Trie *trie;
 	const char *query;
-	size_t query_length;
-	struct ByteArray bytes;
-	struct EntryArray entries;
-} wagner_fischer;
+	size_t query_length, closest_length;
+	struct LeafArray closest; /* Current suggestions with `closest_length`. */
+	struct ByteArray bytes; /* DP matrix `query_length` columns. */
+	struct NodeArray nodes; /*  */
+} wf;
 
+/****** here ********/
+
+/** Destroy memory associated to Wagner-Fisher. */
 static void wagner_fischer_(void) {
-	byte_array_(&wagner_fischer.bytes);
-	entry_array_(&wagner_fischer.entries);
+	leaf_array_(&wf.closest);
+	byte_array_(&wf.bytes);
+	node_array_(&wf.nodes);
+}
+
+/** Initialise Wagner-Fisher with `query`. */
+static void wagner_fischer(const char *const query, const struct Trie *t) {
+	assert(query && t);
+	wf.trie = t;
+	wf.query = query;
+	wf.query_length = strlen(query), assert(wf.query_length < 256); /* Bytes. */
+	leaf_array_clear(&wf.closest);
+	node_array_clear(&wf.nodes);
+	byte_array_clear(&wf.bytes);
+}
+
+/** Suggest Levenshtein geodesics for `word` in `t` and output them to
+ `wagner_fischer.suggest` or `!wagner_fischer.suggest.size` if spelt
+ correctly. This may allocate space which is freed by <wagner_fischer_>.
+ @return Success. */
+static int geodesics(const char *const query, const struct Trie *const t) {
+	Leaf *leaf;
+
+	printf("geodesics %s.\n", query);
+	/* Initialise suggestions. */
+	assert(query && t && t->leaves.size);
+	leaf_array_clear(&wf.closest);
+
+	/* Easy-out to see if `t` actually contains `query`. */
+	if(trie_get(t, query)) return 1;
+
+	/* Greedy educated guess. */
+	wagner_fischer(query, t);
+	if(!node_key(t, query, &wf.nodes)
+		|| !(leaf = leaf_array_new(&wf.closest))) return 0;
+	assert(wf.nodes.size && wf.nodes.data[wf.nodes.size - 1].n0
+		== wf.nodes.data[wf.nodes.size - 1].n1);
+	*leaf = t->leaves.data[wf.nodes.data[wf.nodes.size - 1].i];
+	/*for(i = prefix.low + 1; i <= prefix.high; i++) { *s = t->leaves.data[i]; }*/
+	
+	
+	/*........*/
+	return 1;
 }
 
 
@@ -623,7 +729,7 @@ static int suggest_r(const struct Trie *const t, const char *key,
 		}
 	}
 	assert(n0 == n1 && i < t->leaves.size);
-	if(!(new_key = leaf_new(output))) return 0;
+	if(!(new_key = leaf_array_new(output))) return 0;
 	*new_key = t->leaves.data[i];
 	printf("%sfound \"%s\" }\n", depth2str(edit), *new_key);
 	return 1;
@@ -815,7 +921,7 @@ int main(void) {
 		prefix_in = "pe", prefix_out = "qz";
 	Leaf word;
 	unsigned edit;
-	struct LeafArray suggest = ARRAY_IDLE;
+	struct LeafArray lsuggest = ARRAY_IDLE;
 	int success = EXIT_FAILURE;
 	if(!trie_init(&t, words, words_size, 0)) goto catch;
 
@@ -891,10 +997,10 @@ int main(void) {
 	}
 
 	word = "ainsertion", edit = 1;
-	if(!trie_suggest(&t, word, edit, &suggest)) goto catch;
+	if(!trie_suggest(&t, word, edit, &lsuggest)) goto catch;
 	printf("suggest(\"%s\", %u):", word, edit);
-	for(i = 0; i < suggest.size; i++) printf(" %s", suggest.data[i]);
-	leaf_clear(&suggest);
+	for(i = 0; i < lsuggest.size; i++) printf(" %s", lsuggest.data[i]);
+	leaf_array_clear(&lsuggest);
 	printf("\n");
 	printf("Subset of?\n");
 	printf("%s\n", index_get(&t, "insertion"));
@@ -909,16 +1015,27 @@ int main(void) {
 	printf("%s\n", index_get(&t, "ainsertio"));
 	printf("%s\n", index_get(&t, "ainsertion"));
 
+	word = "trie";
+	if(!geodesics(word, &t)) goto catch;
+	if(!wf.closest.size) {
+		printf("%s spelt correctly.\n", word);
+	} else {
+		printf("Dictionary words closest to %s:", word);
+		for(i = 0; i < wf.closest.size; i++)
+			printf(" %s", wf.closest.data[i]);
+		printf(".\n");
+	}
+
 	trie_(&t);
 	if(!trie_init(&t, extra, extra_size, 0)) goto catch;
 	trie_print(&t);
 	trie_graph(&t, "graph/trie-extra.gv");
 
 	word = "fbar", edit = 2;
-	if(!trie_suggest(&t, word, edit, &suggest)) goto catch;
+	if(!trie_suggest(&t, word, edit, &lsuggest)) goto catch;
 	printf("suggest(\"%s\", %u):", word, edit);
-	for(i = 0; i < suggest.size; i++) printf(" %s", suggest.data[i]);
-	leaf_clear(&suggest);
+	for(i = 0; i < lsuggest.size; i++) printf(" %s", lsuggest.data[i]);
+	leaf_array_clear(&lsuggest);
 	printf("\n");
 	printf("Subset of?\n");
 	printf("%s\n", index_get(&t, "ar"));
@@ -938,14 +1055,14 @@ int main(void) {
 	printf("%s\n", index_get(&t, "fb"));
 	printf("%s\n", index_get(&t, "fba"));
 	printf("%s\n", index_get(&t, "fbar"));
-	
+
 	success = EXIT_SUCCESS;
 	goto finally;
 catch:
 	perror("trie");
 finally:
 	trie_(&t);
-	leaf_array_(&suggest);
+	leaf_array_(&lsuggest);
 	wagner_fischer_();
 	return success;
 }
