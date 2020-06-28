@@ -588,7 +588,7 @@ static int wagner_fischer_word(const char *const candidate) {
 	assert(wf.trie
 		&& candidate && candidate_length < 256
 		&& wf.query  && wf.query_length  < 256);
-	printf("warner fischer word: %s(%lu), %s(%lu)\n",
+	printf("wagrner fischer word: %s(%lu), %s(%lu)\n",
 		wf.query, wf.query_length, candidate, candidate_length);
 	/* Horizontal \times vertical. */
 	table_size = (wf.query_length + 1) * (candidate_length + 1);
