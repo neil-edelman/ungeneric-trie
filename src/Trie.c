@@ -529,42 +529,21 @@ finally:
 /* Memory for dynamic programming. */
 DEFINE_MIN_ARRAY(byte, Byte, uint8_t)
 
-/** @return A new, un-initialized data at the end of `a`, `length` in size.
- @throws[realloc, ERANGE] */
-static uint8_t *byte_array_new_amount(struct ByteArray *const a,
-	const size_t length) {
-	assert(a && length <= ((size_t)-1) - a->size);
-	if(byte_array_reserve(a, a->size + length)) {
-		a->size += length; return a->data + a->size - length;
-	} else {
-		return 0;
-	}
-}
 
-/** Deletes `amount` from the end. */
-static void byte_array_delete_amount(struct ByteArray *const a,
-	const size_t length) { assert(a && length <= a->size); a->size -= length; }
-
-
-
-
-
-/** `bytes.size` == `entries.size` * `query_length`. */
+/** `table.size` == `entries.size` * `query_length`. */
 static struct {
 	const struct Trie *trie;
 	const char *query;
 	size_t query_length, closest_length;
 	struct LeafArray closest; /* Current suggestions with `closest_length`. */
-	struct ByteArray bytes; /* DP matrix `query_length` columns. */
+	struct ByteArray table; /* DP matrix `query_length` columns. */
 	struct NodeArray nodes; /*  */
 } wf;
-
-/****** here ********/
 
 /** Destroy memory associated to Wagner-Fisher. */
 static void wagner_fischer_(void) {
 	leaf_array_(&wf.closest);
-	byte_array_(&wf.bytes);
+	byte_array_(&wf.table);
 	node_array_(&wf.nodes);
 }
 
@@ -576,7 +555,73 @@ static void wagner_fischer(const char *const query, const struct Trie *t) {
 	wf.query_length = strlen(query), assert(wf.query_length < 256); /* Bytes. */
 	leaf_array_clear(&wf.closest);
 	node_array_clear(&wf.nodes);
-	byte_array_clear(&wf.bytes);
+	byte_array_clear(&wf.table);
+}
+
+static void wf_print(const char *const candidate) {
+	size_t candidate_length = strlen(candidate);
+	size_t q, q_end, c;
+	assert(candidate && wf.table.size
+		== (wf.query_length + 1) * (candidate_length + 1));
+	printf("   ");
+	for(q = 0, q_end = wf.query_length; q < q_end; q++)
+		assert(wf.query[q] != '\0'), printf(" %c", wf.query[q]);
+	printf("\n ");
+	for(q = 0, q_end = wf.query_length + 1; q < q_end; q++)
+		printf(" %u", wf.table.data[q]);
+	printf("\n");
+	for(c = 0; c < candidate_length; c++) {
+		assert(candidate[c] != '\0'), printf("%c", candidate[c]);
+		for(q_end = (c + 2) * (wf.query_length + 1);
+			q < q_end; q++) printf(" %u", wf.table.data[q]);
+		if(c >= wf.query_length) printf("--");
+		printf("\n");
+	}
+}
+
+/** @fixme Take advantage of existing structure. */
+static int wagner_fischer_word(const char *const candidate) {
+	const size_t candidate_length = strlen(candidate); /* Vertical. */
+	size_t i, table_size, c, q;
+	/* Fujimoto Seiji, 2019. Can We Optimize the Wagner-Fischer Algorithm? */
+	uint8_t u, v;
+	assert(wf.trie
+		&& candidate && candidate_length < 256
+		&& wf.query  && wf.query_length  < 256);
+	printf("warner fischer word: %s(%lu), %s(%lu)\n",
+		wf.query, wf.query_length, candidate, candidate_length);
+	/* Horizontal \times vertical. */
+	table_size = (wf.query_length + 1) * (candidate_length + 1);
+	byte_array_clear(&wf.table);
+	if(!byte_array_reserve(&wf.table, table_size)) return 0;
+	wf.table.size = table_size;
+	/* debug: fill. */
+	for(i = 0; i < table_size; i++) wf.table.data[i] = 42;
+	/* Fill the first row. */
+	for(i = 0; i <= wf.query_length; i++) wf.table.data[i] = i;
+	/* Fill all others. */
+	for(c = 0; c < candidate_length; c++) {
+		/* Fill the first of the row. */
+		wf.table.data[i++] = c + 1;
+		for(q = 0; q < wf.query_length; q++) {
+			/* @fixme Implement Ukkonen's optimisation?
+			 @fixme Abs min at right, done? */
+			if(wf.query[q] == candidate[c]) {
+				u = wf.table.data[i - wf.query_length - 2]; /* Diagonal. */
+				wf.table.data[i++] = u;
+			} else {
+				u = wf.table.data[i - 1]; /* Left. */
+				v = wf.table.data[i - wf.query_length - 1]; /* Top. */
+				if(u > v) u = v;
+				v = wf.table.data[i - wf.query_length - 2]; /* Diagonal. */
+				if(u > v) u = v;
+				wf.table.data[i++] = u + 1;
+			}
+		}
+		if(c + 2 > wf.query_length);
+	}
+	wf_print(candidate);
+	return 1;
 }
 
 /** Suggest Levenshtein geodesics for `word` in `t` and output them to
@@ -594,154 +639,17 @@ static int geodesics(const char *const query, const struct Trie *const t) {
 	/* Easy-out to see if `t` actually contains `query`. */
 	if(trie_get(t, query)) return 1;
 
-	/* Greedy educated guess. */
+	/* Greedy educated guess to serve as the starting point. */
 	wagner_fischer(query, t);
 	if(!node_key(t, query, &wf.nodes)
 		|| !(leaf = leaf_array_new(&wf.closest))) return 0;
 	assert(wf.nodes.size && wf.nodes.data[wf.nodes.size - 1].n0
 		== wf.nodes.data[wf.nodes.size - 1].n1);
 	*leaf = t->leaves.data[wf.nodes.data[wf.nodes.size - 1].i];
+	if(!wagner_fischer_word(*leaf)) return 0;
+
 	/*for(i = prefix.low + 1; i <= prefix.high; i++) { *s = t->leaves.data[i]; }*/
-	
-	
 	/*........*/
-	return 1;
-}
-
-
-/* Errors. */
-
-
-/* <Levenshtein>:
- - Insertion: -> b;
- - Deletion: a ->;
- - Substitution: a -> b
- <Damerau>:
- - transpositions: ab -> ba */
-
-#if 0
-static int bfs_r(const struct Trie *const t, struct LeafArray *const output,
-	const char *const key, const unsigned remaining_edits,
-	size_t n0, size_t n1, size_t i) {
-	Branch branch;
-	assert(t && output && key
-		&& n0 <= n1 && n1 < t->leaves.size && i < t->leaves.size);
-	while(n0 < n1) {
-		size_t future_bit;
-		branch = t->branches.data[n0];
-		future_bit = bit + trie_skip(branch);
-		for(byte = future_bit >> 3; key_byte < byte; key_byte++)
-			if(key[key_byte] == '\0') { printf("%sinternal node\n", depth2str(edit)); return 1; }
-		
-		/* Delete BFS, subsequent edits only if we are on the next byte. */
-		if(edit && delete_byte < key_byte) delete_byte = key_byte,
-			suggest_r(t, key + 1, output, edit - 1, n0, n1, i, bit);
-		
-		bit = future_bit;
-		left = trie_left(branch);
-		left_child = n0 + 1;
-		right_child = left_child + left;
-		if(!trie_is_bit(key, bit++)) {
-			int is_already = subs_byte == key_byte;
-			printf("%sleft at %lu\n", depth2str(edit), bit);
-			if(edit || is_already) suggest_r(t, key, output, edit - !is_already, right_child, n1, i, bit), subs_byte = key_byte;
-			n0 = left_child, n1 = right_child;
-		} else {
-			int is_already = subs_byte == key_byte;
-			printf("%sright at %lu\n", depth2str(edit), bit);
-			if(edit || is_already) suggest_r(t, key, output, edit - !is_already, right_child, n1, i, bit), subs_byte = key_byte;
-			n0 = right_child, i += left + 1;
-		}
-	}
-	assert(n0 == n1 && i < t->leaves.size);
-	if(!(new_key = leaf_new(output))) return 0;
-	*new_key = t->leaves.data[i];
-	printf("%sfound \"%s\" }\n", depth2str(edit), *new_key);
-	return 1;
-}
-#endif
-
-
-
-
-/*struct TriePosition {
-	const struct Trie *t;
-	const char *key;
-	size_t n0, n1, i, bit;
-	unsigned edit;
-	struct LeafArray *output;
-};*/
-
-static unsigned max_edit;
-
-static const char *depth2str(const unsigned edit) {
-	static char buffer[64];
-	unsigned depth, d;
-	assert(max_edit < sizeof buffer - 1 && edit <= max_edit);
-	depth = max_edit - edit;
-	for(d = 0; d < depth; d++) buffer[d] = '\t';
-	buffer[depth] = '\0';
-	return buffer;
-}
-
-/** Breath-first-search `t` for `edit` Levenshtein edits away from `key` and
- appends `output`. @order I don't know. */
-static int suggest_r(const struct Trie *const t, const char *key,
-	struct LeafArray *const output, const unsigned edit,
-	size_t n0, size_t n1, size_t i, size_t bit) {
-	Branch branch;
-	size_t byte, key_byte = bit >> 3, delete_byte = key_byte, subs_byte = (size_t)-1, future_bit;
-	size_t left, left_child, right_child;
-	Leaf *new_key;
-	assert(t && key && output && n0 <= n1 && n1 < t->leaves.size);
-	printf("%s{ \"%s\" edit %u, n=[%lu, %lu], i=%lu, bit=%lu\n",
-		depth2str(edit), key, edit, n0, n1, i, bit);
-
-	/* BFS limit of `edit`; first edit. */
-	if(edit && key[0] != '\0') /* Deletion. */
-		suggest_r(t, key + 1, output, edit - 1, n0, n1, i, bit);
-
-	while(n0 < n1) {
-		branch = t->branches.data[n0];
-		future_bit = bit + trie_skip(branch);
-		/* `key` ends at an internal branch; NUL-terminator is part of `key`. */
-		for(byte = future_bit >> 3; key_byte < byte; key_byte++)
-			if(key[key_byte] == '\0') { printf("%sinternal node\n", depth2str(edit)); return 1; }
-
-		/* Delete BFS, subsequent edits only if we are on the next byte. */
-		if(edit && delete_byte < key_byte) delete_byte = key_byte,
-			suggest_r(t, key + 1, output, edit - 1, n0, n1, i, bit);
-
-		bit = future_bit;
-		left = trie_left(branch);
-		left_child = n0 + 1;
-		right_child = left_child + left;
-		if(!trie_is_bit(key, bit++)) {
-			int is_already = subs_byte == key_byte;
-			printf("%sleft at %lu\n", depth2str(edit), bit);
-			if(edit || is_already) suggest_r(t, key, output, edit - !is_already, right_child, n1, i, bit), subs_byte = key_byte;
-			n0 = left_child, n1 = right_child;
-		} else {
-			int is_already = subs_byte == key_byte;
-			printf("%sright at %lu\n", depth2str(edit), bit);
-			if(edit || is_already) suggest_r(t, key, output, edit - !is_already, right_child, n1, i, bit), subs_byte = key_byte;
-			n0 = right_child, i += left + 1;
-		}
-	}
-	assert(n0 == n1 && i < t->leaves.size);
-	if(!(new_key = leaf_array_new(output))) return 0;
-	*new_key = t->leaves.data[i];
-	printf("%sfound \"%s\" }\n", depth2str(edit), *new_key);
-	return 1;
-}
-
-/** @return True unless error. */
-static int trie_suggest(const struct Trie *const t, const char *const key,
-	unsigned edit_limit, struct LeafArray *const output) {
-	assert(t && key && output);
-	if(!t->leaves.size) return 1;
-	max_edit = edit_limit; /* Debug print global. */
-	suggest_r(t, key, output, edit_limit, 0, t->leaves.size - 1, 0, 0);
 	return 1;
 }
 
@@ -917,47 +825,47 @@ int main(void) {
 	size_t start, end, i;
 	struct Trie t;
 	Leaf leaf, eject;
-	const Leaf word_in = "lambda", word_out = "slithern",
-		prefix_in = "pe", prefix_out = "qz";
 	Leaf word;
-	unsigned edit;
-	struct LeafArray lsuggest = ARRAY_IDLE;
 	int success = EXIT_FAILURE;
 	if(!trie_init(&t, words, words_size, 0)) goto catch;
 
+	/* Test initialistion. */
 	trie_print(&t);
 	trie_graph(&t, "graph/trie-all-at-once.gv");
 
-	leaf = index_get(&t, word_in);
-	printf("index get: %s --> %s\n", word_in, leaf);
-	leaf = index_get(&t, word_out);
-	printf("index get: %s --> %s\n", word_out, leaf);
-
-	leaf = trie_get(&t, word_in);
-	printf("exact get: %s --> %s\n", word_in, leaf);
-	leaf = trie_get(&t, word_out);
-	printf("exact get: %s --> %s\n", word_out, leaf);
-
-	index_prefix(&t, prefix_in, &start, &end);
-	printf("index prefix: %s --> { ", prefix_in);
+	/* Test get. */
+	word = "lambda";
+	leaf = index_get(&t, word);
+	printf("index get: %s --> %s\n", word, leaf);
+	leaf = trie_get(&t, word);
+	printf("exact get: %s --> %s\n", word, leaf);
+	word = "slithern";
+	leaf = index_get(&t, word);
+	printf("index get: %s --> %s\n", word, leaf);
+	leaf = trie_get(&t, word);
+	printf("exact get: %s --> %s\n", word, leaf);
+	word = "pe";
+	index_prefix(&t, word, &start, &end);
+	printf("index prefix: %s --> { ", word);
 	for(i = start; i <= end; i++)
 		printf("%s%s", i == start ? "" : ", ", t.leaves.data[i]);
 	printf(" }.\n");
-	index_prefix(&t, prefix_out, &start, &end);
-	printf("index prefix: %s --> { ", prefix_out);
+	printf("exact prefix: %s --> { ", word);
+	if(trie_prefix(&t, word, &start, &end)) for(i = start; i <= end; i++)
+		printf("%s%s", i == start ? "" : ", ", t.leaves.data[i]);
+	printf(" }.\n");
+	word = "qz";
+	index_prefix(&t, word, &start, &end);
+	printf("index prefix: %s --> { ", word);
 	for(i = start; i <= end; i++)
 		printf("%s%s", i == start ? "" : ", ", t.leaves.data[i]);
 	printf(" }.\n");
-
-	printf("exact prefix: %s --> { ", prefix_in);
-	if(trie_prefix(&t, prefix_in, &start, &end)) for(i = start; i <= end; i++)
-		printf("%s%s", i == start ? "" : ", ", t.leaves.data[i]);
-	printf(" }.\n");
-	printf("exact prefix: %s --> { ", prefix_out);
-	if(trie_prefix(&t, prefix_out, &start, &end)) for(i = start; i <= end; i++)
+	printf("exact prefix: %s --> { ", word);
+	if(trie_prefix(&t, word, &start, &end)) for(i = start; i <= end; i++)
 		printf("%s%s", i == start ? "" : ", ", t.leaves.data[i]);
 	printf(" }.\n");
 
+	/* Test put. */
 	assert(t.leaves.size == words_size);
 	for(i = 0; i < extra_size; i++) {
 		char fn[64];
@@ -968,15 +876,12 @@ int main(void) {
 	assert(t.leaves.size == words_size + extra_size);
 	for(i = 0; i < words_size; i++) {
 		leaf = trie_get(&t, words[i]);
-		/*printf("found %s --> %s\n", words[i], leaf ? leaf : "nothing");*/
 		assert(leaf && leaf == words[i]);
 	}
 	for(i = 0; i < extra_size; i++) {
 		leaf = trie_get(&t, extra[i]);
-		/*printf("found %s --> %s\n", extra[i], leaf ? leaf : "nothing");*/
 		assert(leaf && leaf == extra[i]);
 	}
-
 	for(i = 0; i < extra_size; i++) {
 		const int is = trie_remove(&t, extra[i]);
 		assert(is);
@@ -985,36 +890,14 @@ int main(void) {
 	assert(t.leaves.size == words_size);
 	for(i = 0; i < words_size; i++) {
 		leaf = trie_get(&t, words[i]);
-		/*printf("delete found %s --> %s\n",
-			words[i], leaf ? leaf : "nothing");*/
 		assert(leaf && leaf == words[i]);
 	}
 	for(i = 0; i < extra_size; i++) {
 		leaf = trie_get(&t, extra[i]);
-		/*printf("delete found %s --> %s\n",
-			extra[i], leaf ? leaf : "nothing");*/
 		assert(!leaf);
 	}
 
-	word = "ainsertion", edit = 1;
-	if(!trie_suggest(&t, word, edit, &lsuggest)) goto catch;
-	printf("suggest(\"%s\", %u):", word, edit);
-	for(i = 0; i < lsuggest.size; i++) printf(" %s", lsuggest.data[i]);
-	leaf_array_clear(&lsuggest);
-	printf("\n");
-	printf("Subset of?\n");
-	printf("%s\n", index_get(&t, "insertion"));
-	printf("%s\n", index_get(&t, "ansertion"));
-	printf("%s\n", index_get(&t, "aisertion"));
-	printf("%s\n", index_get(&t, "ainertion"));
-	printf("%s\n", index_get(&t, "ainsrtion"));
-	printf("%s\n", index_get(&t, "ainsetion"));
-	printf("%s\n", index_get(&t, "ainserion"));
-	printf("%s\n", index_get(&t, "ainserton"));
-	printf("%s\n", index_get(&t, "ainsertin"));
-	printf("%s\n", index_get(&t, "ainsertio"));
-	printf("%s\n", index_get(&t, "ainsertion"));
-
+	/* Test spelling. */
 	word = "trie";
 	if(!geodesics(word, &t)) goto catch;
 	if(!wf.closest.size) {
@@ -1026,43 +909,205 @@ int main(void) {
 		printf(".\n");
 	}
 
-	trie_(&t);
-	if(!trie_init(&t, extra, extra_size, 0)) goto catch;
-	trie_print(&t);
-	trie_graph(&t, "graph/trie-extra.gv");
-
-	word = "fbar", edit = 2;
-	if(!trie_suggest(&t, word, edit, &lsuggest)) goto catch;
-	printf("suggest(\"%s\", %u):", word, edit);
-	for(i = 0; i < lsuggest.size; i++) printf(" %s", lsuggest.data[i]);
-	leaf_array_clear(&lsuggest);
-	printf("\n");
-	printf("Subset of?\n");
-	printf("%s\n", index_get(&t, "ar"));
-	printf("%s\n", index_get(&t, "br"));
-	printf("%s\n", index_get(&t, "ba"));
-	printf("%s\n", index_get(&t, "bar"));
-	printf("%s\n", index_get(&t, "ar"));
-	printf("%s\n", index_get(&t, "fr"));
-	printf("%s\n", index_get(&t, "fa"));
-	printf("%s\n", index_get(&t, "far"));
-	printf("%s\n", index_get(&t, "br"));
-	printf("%s\n", index_get(&t, "fr"));
-	printf("%s\n", index_get(&t, "fb"));
-	printf("%s\n", index_get(&t, "fbr"));
-	printf("%s\n", index_get(&t, "ba"));
-	printf("%s\n", index_get(&t, "fa"));
-	printf("%s\n", index_get(&t, "fb"));
-	printf("%s\n", index_get(&t, "fba"));
-	printf("%s\n", index_get(&t, "fbar"));
-
 	success = EXIT_SUCCESS;
 	goto finally;
 catch:
 	perror("trie");
 finally:
 	trie_(&t);
-	leaf_array_(&lsuggest);
 	wagner_fischer_();
 	return success;
 }
+
+
+
+
+
+
+#if 0
+/*printf("delete found %s --> %s\n",
+ words[i], leaf ? leaf : "nothing");*/
+/*printf("delete found %s --> %s\n",
+ extra[i], leaf ? leaf : "nothing");*/
+/*printf("found %s --> %s\n", words[i], leaf ? leaf : "nothing");*/
+/*printf("found %s --> %s\n", extra[i], leaf ? leaf : "nothing");*/
+
+/*word = "ainsertion", edit = 1;
+ if(!trie_suggest(&t, word, edit, &lsuggest)) goto catch;
+ printf("suggest(\"%s\", %u):", word, edit);
+ for(i = 0; i < lsuggest.size; i++) printf(" %s", lsuggest.data[i]);
+ leaf_array_clear(&lsuggest);
+ printf("\n");
+ printf("Subset of?\n");
+ printf("%s\n", index_get(&t, "insertion"));
+ printf("%s\n", index_get(&t, "ansertion"));
+ printf("%s\n", index_get(&t, "aisertion"));
+ printf("%s\n", index_get(&t, "ainertion"));
+ printf("%s\n", index_get(&t, "ainsrtion"));
+ printf("%s\n", index_get(&t, "ainsetion"));
+ printf("%s\n", index_get(&t, "ainserion"));
+ printf("%s\n", index_get(&t, "ainserton"));
+ printf("%s\n", index_get(&t, "ainsertin"));
+ printf("%s\n", index_get(&t, "ainsertio"));
+ printf("%s\n", index_get(&t, "ainsertion"));*/
+
+/*
+ trie_(&t);
+ if(!trie_init(&t, extra, extra_size, 0)) goto catch;
+ trie_print(&t);
+ trie_graph(&t, "graph/trie-extra.gv");
+ 
+ word = "fbar", edit = 2;
+ if(!trie_suggest(&t, word, edit, &lsuggest)) goto catch;
+ printf("suggest(\"%s\", %u):", word, edit);
+ for(i = 0; i < lsuggest.size; i++) printf(" %s", lsuggest.data[i]);
+ leaf_array_clear(&lsuggest);
+ printf("\n");
+ printf("Subset of?\n");
+ printf("%s\n", index_get(&t, "ar"));
+ printf("%s\n", index_get(&t, "br"));
+ printf("%s\n", index_get(&t, "ba"));
+ printf("%s\n", index_get(&t, "bar"));
+ printf("%s\n", index_get(&t, "ar"));
+ printf("%s\n", index_get(&t, "fr"));
+ printf("%s\n", index_get(&t, "fa"));
+ printf("%s\n", index_get(&t, "far"));
+ printf("%s\n", index_get(&t, "br"));
+ printf("%s\n", index_get(&t, "fr"));
+ printf("%s\n", index_get(&t, "fb"));
+ printf("%s\n", index_get(&t, "fbr"));
+ printf("%s\n", index_get(&t, "ba"));
+ printf("%s\n", index_get(&t, "fa"));
+ printf("%s\n", index_get(&t, "fb"));
+ printf("%s\n", index_get(&t, "fba"));
+ printf("%s\n", index_get(&t, "fbar"));
+ */
+
+/* <Levenshtein>:
+ - Insertion: -> b;
+ - Deletion: a ->;
+ - Substitution: a -> b
+ <Damerau>:
+ - transpositions: ab -> ba */
+static int bfs_r(const struct Trie *const t, struct LeafArray *const output,
+				 const char *const key, const unsigned remaining_edits,
+				 size_t n0, size_t n1, size_t i) {
+	Branch branch;
+	assert(t && output && key
+		   && n0 <= n1 && n1 < t->leaves.size && i < t->leaves.size);
+	while(n0 < n1) {
+		size_t future_bit;
+		branch = t->branches.data[n0];
+		future_bit = bit + trie_skip(branch);
+		for(byte = future_bit >> 3; key_byte < byte; key_byte++)
+			if(key[key_byte] == '\0') { printf("%sinternal node\n", depth2str(edit)); return 1; }
+
+		/* Delete BFS, subsequent edits only if we are on the next byte. */
+		if(edit && delete_byte < key_byte) delete_byte = key_byte,
+			suggest_r(t, key + 1, output, edit - 1, n0, n1, i, bit);
+
+		bit = future_bit;
+		left = trie_left(branch);
+		left_child = n0 + 1;
+		right_child = left_child + left;
+		if(!trie_is_bit(key, bit++)) {
+			int is_already = subs_byte == key_byte;
+			printf("%sleft at %lu\n", depth2str(edit), bit);
+			if(edit || is_already) suggest_r(t, key, output, edit - !is_already, right_child, n1, i, bit), subs_byte = key_byte;
+			n0 = left_child, n1 = right_child;
+		} else {
+			int is_already = subs_byte == key_byte;
+			printf("%sright at %lu\n", depth2str(edit), bit);
+			if(edit || is_already) suggest_r(t, key, output, edit - !is_already, right_child, n1, i, bit), subs_byte = key_byte;
+			n0 = right_child, i += left + 1;
+		}
+	}
+	assert(n0 == n1 && i < t->leaves.size);
+	if(!(new_key = leaf_new(output))) return 0;
+	*new_key = t->leaves.data[i];
+	printf("%sfound \"%s\" }\n", depth2str(edit), *new_key);
+	return 1;
+}
+
+/*struct TriePosition {
+ const struct Trie *t;
+ const char *key;
+ size_t n0, n1, i, bit;
+ unsigned edit;
+ struct LeafArray *output;
+ };*/
+
+static unsigned max_edit;
+
+static const char *depth2str(const unsigned edit) {
+	static char buffer[64];
+	unsigned depth, d;
+	assert(max_edit < sizeof buffer - 1 && edit <= max_edit);
+	depth = max_edit - edit;
+	for(d = 0; d < depth; d++) buffer[d] = '\t';
+	buffer[depth] = '\0';
+	return buffer;
+}
+
+/** Breath-first-search `t` for `edit` Levenshtein edits away from `key` and
+ appends `output`. @order I don't know. */
+static int suggest_r(const struct Trie *const t, const char *key,
+	struct LeafArray *const output, const unsigned edit,
+	size_t n0, size_t n1, size_t i, size_t bit) {
+	Branch branch;
+	size_t byte, key_byte = bit >> 3, delete_byte = key_byte, subs_byte = (size_t)-1, future_bit;
+	size_t left, left_child, right_child;
+	Leaf *new_key;
+	assert(t && key && output && n0 <= n1 && n1 < t->leaves.size);
+	printf("%s{ \"%s\" edit %u, n=[%lu, %lu], i=%lu, bit=%lu\n",
+		depth2str(edit), key, edit, n0, n1, i, bit);
+
+	/* BFS limit of `edit`; first edit. */
+	if(edit && key[0] != '\0') /* Deletion. */
+		suggest_r(t, key + 1, output, edit - 1, n0, n1, i, bit);
+
+	while(n0 < n1) {
+		branch = t->branches.data[n0];
+		future_bit = bit + trie_skip(branch);
+		/* `key` ends at an internal branch; NUL-terminator is part of `key`. */
+		for(byte = future_bit >> 3; key_byte < byte; key_byte++)
+			if(key[key_byte] == '\0') { printf("%sinternal node\n", depth2str(edit)); return 1; }
+
+		/* Delete BFS, subsequent edits only if we are on the next byte. */
+		if(edit && delete_byte < key_byte) delete_byte = key_byte,
+			suggest_r(t, key + 1, output, edit - 1, n0, n1, i, bit);
+
+		bit = future_bit;
+		left = trie_left(branch);
+		left_child = n0 + 1;
+		right_child = left_child + left;
+		if(!trie_is_bit(key, bit++)) {
+			int is_already = subs_byte == key_byte;
+			printf("%sleft at %lu\n", depth2str(edit), bit);
+			if(edit || is_already) suggest_r(t, key, output, edit - !is_already, right_child, n1, i, bit), subs_byte = key_byte;
+			n0 = left_child, n1 = right_child;
+		} else {
+			int is_already = subs_byte == key_byte;
+			printf("%sright at %lu\n", depth2str(edit), bit);
+			if(edit || is_already) suggest_r(t, key, output, edit - !is_already, right_child, n1, i, bit), subs_byte = key_byte;
+			n0 = right_child, i += left + 1;
+		}
+	}
+	assert(n0 == n1 && i < t->leaves.size);
+	if(!(new_key = leaf_array_new(output))) return 0;
+	*new_key = t->leaves.data[i];
+	printf("%sfound \"%s\" }\n", depth2str(edit), *new_key);
+	return 1;
+}
+
+/** @return True unless error. */
+static int trie_suggest(const struct Trie *const t, const char *const key,
+	unsigned edit_limit, struct LeafArray *const output) {
+	assert(t && key && output);
+	if(!t->leaves.size) return 1;
+	max_edit = edit_limit; /* Debug print global. */
+	suggest_r(t, key, output, edit_limit, 0, t->leaves.size - 1, 0, 0);
+	return 1;
+}
+
+#endif
