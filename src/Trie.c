@@ -11,10 +11,12 @@
 #include <string.h> /* memmove memcpy */
 #include <assert.h> /* assert */
 #include <errno.h>  /* errno */
+#include <limits.h> /* INT_MAX */
 /* Added in `C99` and doesn't guarantee `uint64_t`; can be replaced with
  `typedef` these machine-dependant types. */
 #include <stdint.h> /* uint8_t uint64_t */
 
+#define DICT_MAX_WORD_LENGTH 64
 
 #define DEFINE_MIN_ARRAY(name, Name, type) \
 /* A dynamic array. */ \
@@ -116,14 +118,12 @@ static void leaf_compactify(struct LeafArray *const a,
 }
 
 
-/** Trie pre-order internal nodes in the style of <Morrison, 1968 PATRICiA>
+/* Trie pre-order internal nodes in the style of <Morrison, 1968 PATRICiA>
  semi-implicitly. Each contains two items of information in a `size_t`: left
  children branches are <fn:trie_left> immediately following, right children are
  the rest, and <fn:trie_skip>, the length in bits of the don't care values
  preceding this branch in the string. */
-typedef size_t Branch;
-
-DEFINE_MIN_ARRAY(branch, Branch, Branch)
+DEFINE_MIN_ARRAY(size, Size, size_t)
 
 /* 12 makes the maximum skip length 512 bytes and the maximum size of a trie is
  `size_t` 64-bits: 4503599627370495, 32-bits: 1048575, and 16-bits: 15. */
@@ -132,17 +132,17 @@ DEFINE_MIN_ARRAY(branch, Branch, Branch)
 #define TRIE_LEFT_MAX (((size_t)1 << ((sizeof(size_t) << 3) - TRIE_SKIP)) - 1)
 
 /** @return Packs `skip` and `left` into a branch. */
-static Branch trie_branch(const size_t skip, const size_t left) {
+static size_t trie_branch(const size_t skip, const size_t left) {
 	assert(skip <= TRIE_SKIP_MAX && left <= TRIE_LEFT_MAX);
 	return skip + (left << TRIE_SKIP);
 }
 
 /** @return Unpacks skip from `branch`. */
-static size_t trie_skip(const Branch branch)
+static size_t trie_skip(const size_t branch)
 	{ return branch & TRIE_SKIP_MAX; }
 
 /** @return Unpacks left descendent branches from `branch`. */
-static size_t trie_left(const Branch branch) { return branch >> TRIE_SKIP; }
+static size_t trie_left(const size_t branch) { return branch >> TRIE_SKIP; }
 
 /** Overwrites `skip` in `branch`. */
 static void trie_skip_set(size_t *const branch, size_t skip) {
@@ -190,15 +190,15 @@ static int trie_is_prefix(const char *a, const char *b) {
 
 /** Trie is a full binary tree, it's either empty or
  `|branches| + 1 = |leaves|`. */
-struct Trie { struct BranchArray branches; struct LeafArray leaves; };
+struct Trie { struct SizeArray branches; struct LeafArray leaves; };
 
 /** Initialises `t` to idle. */
 static void trie(struct Trie *const t)
-	{ assert(t); branch_array(&t->branches), leaf_array(&t->leaves); }
+	{ assert(t); size_array(&t->branches), leaf_array(&t->leaves); }
 
 /** Returns an initialised `t` to idle. */
 static void trie_(struct Trie *const t)
-	{ assert(t); branch_array_(&t->branches), leaf_array_(&t->leaves); }
+	{ assert(t); size_array_(&t->branches), leaf_array_(&t->leaves); }
 
 /** Recursive function used for <fn:trie_init>. Initialise branches of `t`
  up to `bit` with `a` to `a_size` array of sorted leaves.
@@ -207,7 +207,7 @@ static void trie_init_branches_r(struct Trie *const t, size_t bit,
 	const size_t a, const size_t a_size) {
 	size_t b = a, b_size = a_size, half;
 	size_t skip = 0;
-	Branch *branch;
+	size_t *branch;
 	assert(t && a_size && a_size <= t->leaves.size && t->leaves.size
 		&& t->branches.capacity >= t->leaves.size - 1);
 	if(a_size <= 1) return;
@@ -221,7 +221,7 @@ static void trie_init_branches_r(struct Trie *const t, size_t bit,
 		? b_size = half : (half++, b += half, b_size -= half);
 	b_size = b - a;
 	/* Should have space for all branches pre-allocated in <fn:<PN>init>. */
-	branch = branch_array_new(&t->branches), assert(branch);
+	branch = size_array_new(&t->branches), assert(branch);
 	*branch = trie_branch(skip, b_size - 1);
 	bit++;
 	trie_init_branches_r(t, bit, a, b_size);
@@ -239,7 +239,7 @@ static int trie_init(struct Trie *const t, const Leaf *const a,
 	trie(t);
 	/* This will store space for all of the duplicates, as well. */
 	if(!leaf_array_reserve(&t->leaves, a_size)
-		|| !branch_array_reserve(&t->branches, a_size - 1)) return 0;
+		|| !size_array_reserve(&t->branches, a_size - 1)) return 0;
 	leaves = t->leaves.data;
 	memcpy(leaves, a, sizeof *a * a_size);
 	t->leaves.size = a_size;
@@ -261,7 +261,7 @@ static int param_index_get(const struct Trie *const t, const char *const key,
 	 descendant branches. `i` is the leaf index. `left` is all ancestor's left
 	 branches. */
 	size_t n0 = 0, n1 = t->branches.size, i = 0, left;
-	Branch ancestor;
+	size_t ancestor;
 	size_t byte, key_byte = 0, bit = 0;
 	assert(t && key && result);
 	if(!t->leaves.size) return assert(!n1), 0; /* Empty tree. */
@@ -309,7 +309,7 @@ static Leaf trie_get(const struct Trie *const t, const char *const key) {
 static void index_prefix(const struct Trie *const t, const char *const prefix,
 	size_t *const low, size_t *const high) {
 	size_t n0 = 0, n1 = t->branches.size, i = 0, left;
-	Branch branch;
+	size_t branch;
 	size_t byte, key_byte = 0, bit = 0;
 	assert(t && prefix && low && high);
 	assert(n1 + 1 == t->leaves.size); /* Full binary tree. */
@@ -347,7 +347,7 @@ static int trie_prefix(const struct Trie *const t, const char *const prefix,
 static int trie_add_unique(struct Trie *const t, Leaf datum) {
 	const size_t leaf_size = t->leaves.size, branch_size = leaf_size - 1;
 	size_t n0 = 0, n1 = branch_size, i = 0, left, bit = 0, bit0 = 0, bit1;
-	Branch *branch = 0;
+	size_t *branch = 0;
 	const char *n0_key;
 	Leaf *leaf;
 	int cmp;
@@ -360,7 +360,7 @@ static int trie_add_unique(struct Trie *const t, Leaf datum) {
 	/* Conservative maximally unbalanced trie. Reserve one more. */
 	if(leaf_size > TRIE_LEFT_MAX) return errno = ERANGE, 0;
 	if(!leaf_array_reserve(&t->leaves, leaf_size + 1)
-		|| !branch_array_reserve(&t->branches, branch_size + 1)) return 0;
+		|| !size_array_reserve(&t->branches, branch_size + 1)) return 0;
 	/* Branch from internal node. */
 	while(branch = t->branches.data + n0, n0_key = t->leaves.data[i], n0 < n1) {
 		/* fixme: Detect overflow 12 bits between. */
@@ -464,31 +464,71 @@ static int trie_remove(struct Trie *const t, const char *const key) {
 
 
 /** This saves the position in the trie, bit-by-bit. */
-struct Node { size_t n0, n1, i; enum { LEFT, RIGHT, LEAF } choice; };
+struct Node { size_t bit, n0, n1, i; enum { LEFT, RIGHT, LEAF } choice; };
 
 DEFINE_MIN_ARRAY(node, Node, struct Node)
 
-static void node_array_delete(struct NodeArray *const a)
-	{ assert(a && a->size); a->size--; }
+struct TriePath {
+	const struct Trie trie; /* Pointers to words in order and branches. */
+	struct NodeArray nodes; /* Path to currently selected word. */
+	struct SizeArray byte;  /* Bytes in `nodes`. */
+};
+
+static void path_(struct TriePath *const path) {
+	assert(path);
+	node_array_(&path->nodes);
+	size_array_(&path->byte);
+}
+
+static void path_clear(struct TriePath *const path) {
+	assert(path);
+	node_array_clear(&path->nodes);
+	size_array_clear(&path->byte);
+}
+
+/** Add to `path`, `bit`, which must be strictly monotonic with other bits,
+ `n0` >= `n1`, branch indices, and `i`, leaf index. */
+static struct Node *path_new(struct TriePath *const path, const size_t bit,
+	const size_t n0, const size_t n1, const size_t i) {
+	struct Node *node;
+	const size_t byte = bit >> 3;
+	printf("path_new bit %lu byte %lu: [%lu, %lu], leaf %lu.\n",
+		bit, byte, n0, n1, i);
+	assert(path && (!path->byte.size
+		|| path->byte.data[path->byte.size - 1] <= byte) && n0 <= n1);
+	node = node_array_new(&path->nodes);
+	node->bit = bit;
+	node->n0  = n0;
+	node->n1  = n1;
+	node->i   = i;
+	node->choice = LEAF;
+	/* Expand `byte` to include `bit`. Is sort of a hash, bits in bytes. */
+	if(path->byte.size == byte + 1) goto finally;
+	assert(path->byte.size < byte + 1);
+	if(!size_array_reserve(&path->byte, byte + 1)) return 0;
+	while(byte >= path->byte.size) path->byte.data[path->byte.size++] = byte;
+finally:
+	return node;
+}
+
 
 /** In `t`, which must be non-empty, given a `key`, stores every choice made,
  only given the index, ignoring don't care bits. If given `key` in `t`, it will
  find the path to it, and `key` not in `t`, it will find a path to some element
  in `t`. @order \O(`key.length`) @return Success. */
-static int node_key(const struct Trie *const t, const char *const key,
-	struct NodeArray *const nodes) {
+static int path_key(const struct Trie *const t, const char *const key,
+	struct TriePath *const path) {
 	size_t n0 = 0, n1 = t->branches.size, i = 0, left, right;
-	Branch branch;
+	size_t branch;
 	size_t byte, key_byte = 0, bit = 0;
 	struct Node *node;
 	printf("node_key %s\n", key);
-	assert(t && key && nodes);
-	node_array_clear(nodes);
+	assert(t && key && path);
+	path_clear(path);
 	assert(n1 + 1 == t->leaves.size); /* Full binary tree. */
 	/* Descend the trie normally, storing the nodes. */
-	while((node = node_array_new(nodes))
-		&& (node->n0 = n0, node->n1 = n1, node->i = i, node->choice = LEAF,
-		printf("node_key1 [%lu,%lu]\n", n0, n1),
+	while((node = path_new(path, bit, n0, n1, i))
+		&& (printf("node_key1 [%lu,%lu]\n", n0, n1),
 		n0 < n1)) {
 		branch = t->branches.data[n0];
 		bit += trie_skip(branch);
@@ -503,10 +543,9 @@ static int node_key(const struct Trie *const t, const char *const key,
 	goto finally;
 	/* End of `key` and still in the internal nodes. Instead of calculating all
 	 the paths to find the shortest, greedily take the one with the least
-	 children, (statistically the best choice.) */
-	while((node = node_array_new(nodes))
-		&& (node->n0 = n0, node->n1 = n1, node->i = i, node->choice = LEAF,
-		printf("node_key2 [%lu,%lu]\n", n0, n1),
+	 children, (statistically the best choice without looking at them.) */
+	while((node = path_new(path, bit, n0, n1, i))
+		&& (printf("node_key2 [%lu,%lu]\n", n0, n1),
 		n0 < n1)) {
 		branch = t->branches.data[n0];
 		bit += trie_skip(branch);
@@ -532,30 +571,49 @@ DEFINE_MIN_ARRAY(byte, Byte, uint8_t)
 
 /** `table.size` == `entries.size` * `query_length`. */
 static struct {
-	const struct Trie *trie;
 	const char *query;
-	size_t query_length, closest_length;
+	size_t query_length, closest_length, common;
 	struct LeafArray closest; /* Current suggestions with `closest_length`. */
 	struct ByteArray table; /* DP matrix `query_length` columns. */
-	struct NodeArray nodes; /*  */
+	struct TriePath path;
 } wf;
+
+static void path_print(void) {
+	size_t byte, max, i = 0;
+	struct Node *n;
+	for(byte = 0; byte < wf.path.byte.size; byte++) {
+		max = wf.path.byte.data[byte], assert(max <= wf.path.nodes.size);
+		printf("__ byte %lu (bits %lu--%lu) __\n",
+			byte, byte << 3, (byte << 3) + 7);
+		while(i < max) {
+			n = wf.path.nodes.data + i++;
+			printf(" [%lu,%lu], leaf %lu, choice %u\n",
+				n->n0, n->n1, n->i, n->choice);
+		}
+	}
+	printf("__ the rest __\n");
+	while(i < wf.path.nodes.size) {
+		n = wf.path.nodes.data + i++;
+		printf(" [%lu,%lu], leaf %lu, choice %u\n",
+			n->n0, n->n1, n->i, n->choice);
+	}
+}
 
 /** Destroy memory associated to Wagner-Fisher. */
 static void wagner_fischer_(void) {
 	leaf_array_(&wf.closest);
 	byte_array_(&wf.table);
-	node_array_(&wf.nodes);
+	path_(&wf.path);
 }
 
 /** Initialise Wagner-Fisher with `query`. */
-static void wagner_fischer(const char *const query, const struct Trie *t) {
-	assert(query && t);
-	wf.trie = t;
+static void wagner_fischer(const char *const query) {
+	assert(query);
 	wf.query = query;
 	wf.query_length = strlen(query), assert(wf.query_length < 256); /* Bytes. */
 	leaf_array_clear(&wf.closest);
-	node_array_clear(&wf.nodes);
 	byte_array_clear(&wf.table);
+	path_clear(&wf.path);
 }
 
 static void wf_print(const char *const candidate) {
@@ -579,16 +637,16 @@ static void wf_print(const char *const candidate) {
 	}
 }
 
-/** @fixme Take advantage of existing structure. */
 static int wagner_fischer_word(const char *const candidate) {
 	const size_t candidate_length = strlen(candidate); /* Vertical. */
-	size_t i, table_size, c, q;
-	/* Fujimoto Seiji, 2019. Can We Optimize the Wagner-Fischer Algorithm? */
+	size_t table_size, i, c, q;
+	/* Contains excepts from 2019 Fujimoto Seiji <fujimoto@ceptord.net>. Can We
+	 Optimize the Wagner-Fischer Algorithm? placed in public domain. */
 	uint8_t u, v;
-	assert(wf.trie
+	assert(wf.path.trie
 		&& candidate && candidate_length < 256
 		&& wf.query  && wf.query_length  < 256);
-	printf("wagrner fischer word: %s(%lu), %s(%lu)\n",
+	printf("wagner fischer word: %s(%lu), %s(%lu)\n",
 		wf.query, wf.query_length, candidate, candidate_length);
 	/* Horizontal \times vertical. */
 	table_size = (wf.query_length + 1) * (candidate_length + 1);
@@ -597,6 +655,7 @@ static int wagner_fischer_word(const char *const candidate) {
 	wf.table.size = table_size;
 	/* debug: fill. */
 	for(i = 0; i < table_size; i++) wf.table.data[i] = 42;
+	wf.common = 0;
 	/* Fill the first row. */
 	for(i = 0; i <= wf.query_length; i++) wf.table.data[i] = i;
 	/* Fill all others. */
@@ -609,6 +668,7 @@ static int wagner_fischer_word(const char *const candidate) {
 			if(wf.query[q] == candidate[c]) {
 				u = wf.table.data[i - wf.query_length - 2]; /* Diagonal. */
 				wf.table.data[i++] = u;
+				if(!u) wf.common++;
 			} else {
 				u = wf.table.data[i - 1]; /* Left. */
 				v = wf.table.data[i - wf.query_length - 1]; /* Top. */
@@ -624,12 +684,91 @@ static int wagner_fischer_word(const char *const candidate) {
 	return 1;
 }
 
+/* Wagner-Fischer (Memory Reduction + Branch Pruning.) From 2019 Fujimoto Seiji
+ <fujimoto@ceptord.net>: Can We Optimize the Wagner-Fischer Algorithm? placed
+ in public domain. `a_str` is length `a_len` and `b_str` is length `b_len`.
+ `a_len` >= `b_len` and within `INT_MAX`. Should be called from
+ <fn:wagner_fischer_do>. @fixme Take advantage of existing structure. */
+static unsigned wagner_fischer_o2(const char *const a_str, const unsigned a_len,
+	const char *const b_str, const unsigned b_len) {
+	int min;
+	unsigned max, min_clip, max_clip;
+	unsigned a, b, dia, top, left;
+	unsigned buf[DICT_MAX_WORD_LENGTH];
+
+	/* Greedy special lengths. */
+	assert(0 <= b_len && b_len <= a_len
+		&& b_len < sizeof buf / sizeof *buf - 1);
+	if(b_len == 0) return a_len;
+	if(b_len == 1) return a_len - !!memchr(a_str, b_str[0], a_len);
+	if(b_len == 2) {
+		const char *const match = memchr(a_str, b_str[0], a_len - 1);
+		return a_len - !!index((match ? match : a_str) + 1, b_str[1]) - !!match;
+	}
+
+	/* Branch pruning initial values. */
+	max = (b_len - 1) >> 1;
+	min = 1 - max - (a_len - b_len);
+
+	/* Fill first row. */
+	for(b = 0; b <= max; b++) buf[b] = b;
+
+	/* DP. */
+	for(a = 1; a <= a_len; a++) {
+		buf[0] = a - 1;
+		min_clip = min > 1 ? min : 1,         min++;
+		max_clip = max < b_len ? max : b_len, max++;
+		dia = buf[min_clip - 1];
+		top = buf[min_clip];
+		if(a_str[a - 1] != b_str[min_clip - 1])
+			dia = (dia < top ? dia : top) + 1;
+		buf[min_clip] = dia;
+		left = dia;
+		dia  = top;
+		for(b = min_clip + 1; b <= max_clip; b++) {
+			top = buf[b];
+			if(a_str[a - 1] != b_str[b - 1]) {
+				if(dia > top)  dia = top;
+				if(dia > left) dia = left;
+				dia++;
+			}
+			buf[b] = dia;
+			left = dia;
+			dia = top;
+		}
+		if(b_len == max_clip) continue;
+		if(a_str[a - 1] != b_str[max_clip])
+			dia = (dia < left ? dia : left) + 1;
+		buf[max_clip + 1] = dia;
+	}
+	dia = buf[b_len];
+	return dia;
+}
+
+/* Calls <fn:wagner_fisher_o2> with the order correct. */
+static int wagner_fischer_do(const char *const a, const char *const b,
+	unsigned *const result) {
+	const size_t a_length = strlen(a), b_length = strlen(b);
+	assert(a && b && result);
+	if(a_length < b_length) {
+		if(a_length >= DICT_MAX_WORD_LENGTH || b_length >= UINT_MAX) return 0;
+		*result
+			= wagner_fischer_o2(b, (unsigned)b_length, a, (unsigned)a_length);
+	} else {
+		if(a_length >= UINT_MAX || b_length >= DICT_MAX_WORD_LENGTH) return 0;
+		*result
+			= wagner_fischer_o2(a, (unsigned)a_length, b, (unsigned)b_length);
+	}
+	return 1;
+}
+
 /** Suggest Levenshtein geodesics for `word` in `t` and output them to
  `wagner_fischer.suggest` or `!wagner_fischer.suggest.size` if spelt
  correctly. This may allocate space which is freed by <wagner_fischer_>.
  @return Success. */
 static int geodesics(const char *const query, const struct Trie *const t) {
 	Leaf *leaf;
+	unsigned lev;
 
 	printf("geodesics %s.\n", query);
 	/* Initialise suggestions. */
@@ -641,12 +780,19 @@ static int geodesics(const char *const query, const struct Trie *const t) {
 
 	/* Greedy educated guess to serve as the starting point. */
 	wagner_fischer(query, t);
-	if(!node_key(t, query, &wf.nodes)
+	if(!path_key(t, query, &wf.path)
 		|| !(leaf = leaf_array_new(&wf.closest))) return 0;
-	assert(wf.nodes.size && wf.nodes.data[wf.nodes.size - 1].n0
-		== wf.nodes.data[wf.nodes.size - 1].n1);
-	*leaf = t->leaves.data[wf.nodes.data[wf.nodes.size - 1].i];
+	path_print();
+	assert(wf.path.nodes.size && wf.path.nodes.data[wf.path.nodes.size - 1].n0
+		== wf.path.nodes.data[wf.path.nodes.size - 1].n1);
+	*leaf = t->leaves.data[wf.path.nodes.data[wf.path.nodes.size - 1].i];
 	if(!wagner_fischer_word(*leaf)) return 0;
+	printf("common: %lu\n", wf.common);
+
+	if(wagner_fischer_do(query, *leaf, &lev))
+		printf("wf do: %u\n", lev);
+	else
+		printf("overflow\n");
 
 	/*for(i = prefix.low + 1; i <= prefix.high; i++) { *s = t->leaves.data[i]; }*/
 	/*........*/
@@ -956,7 +1102,7 @@ finally:
  if(!trie_init(&t, extra, extra_size, 0)) goto catch;
  trie_print(&t);
  trie_graph(&t, "graph/trie-extra.gv");
- 
+
  word = "fbar", edit = 2;
  if(!trie_suggest(&t, word, edit, &lsuggest)) goto catch;
  printf("suggest(\"%s\", %u):", word, edit);
