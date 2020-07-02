@@ -479,11 +479,13 @@ DEFINE_MIN_ARRAY(byte, Byte, uint8_t)
 
 struct Path {
 	struct Trie dict; /* Pointers to in-order words as leaves and branches. */
-	const char *query; /* The word we are looking up in `trie`. */
-	size_t query_length;
+	/* <fn:path_dfs>. */
 	struct NodeArray nodes; /* Temporary path to an entry in `trie`. */
 	struct SizeArray next; /* Index in `nodes` of each byte. */
-	unsigned ld, common; /* Levenshtein, common bytes, of `query` with temp. */
+	/* <fn:path_wagner_fisher>. */
+	const char *row, *column;
+	size_t row_length, column_length;
+	unsigned ld, common; /* Levenshtein, common bytes. */
 	struct LeafArray closest; /* Current suggestions with `ld`. */
 	struct ByteArray table; /* DP matrix with width `query_length`. */
 };
@@ -492,11 +494,14 @@ struct Path {
 static int path(struct Path *const p, const Leaf *const a,
 	const size_t a_size) {
 	assert(p && a && a_size);
+	/* Dictionary. */
 	trie(&p->dict);
+	/* <fn:path_dfs>. */
 	node_array(&p->nodes);
 	size_array(&p->next);
-	p->query = 0;
-	p->query_length = 0;
+	/* <fn:path_wagner_fisher>. */
+	p->row = p->column = 0;
+	p->row_length = p->column_length = 0;
 	p->ld = p->common = 0;
 	leaf_array(&p->closest);
 	byte_array(&p->table);
@@ -512,6 +517,7 @@ static void path_(struct Path *const p) {
 	leaf_array_(&p->closest);
 	byte_array_(&p->table);
 }
+/** Print `p`. */
 static void path_print(const struct Path *const p) {
 	size_t next, max, i = 0;
 	struct Node *n;
@@ -527,7 +533,7 @@ static void path_print(const struct Path *const p) {
 		while(i < max) {
 			n = p->nodes.data + i++;
 			printf(" Bit %lu: [%lu,%lu], leaf %lu, choice %u\n",
-				   n->bit, n->n0, n->n1, n->i, n->choice);
+				n->bit, n->n0, n->n1, n->i, n->choice);
 		}
 	}
 	printf("__ the rest __\n");
@@ -536,26 +542,6 @@ static void path_print(const struct Path *const p) {
 		printf(" Bit %lu: [%lu,%lu], leaf %lu, choice %u\n",
 			   n->bit, n->n0, n->n1, n->i, n->choice);
 	}
-#if 0
-	size_t candidate_length = strlen(candidate);
-	size_t q, q_end, c;
-	assert(candidate && wf.table.size
-		   == (wf.query_length + 1) * (candidate_length + 1));
-	printf("   ");
-	for(q = 0, q_end = wf.query_length; q < q_end; q++)
-		assert(wf.query[q] != '\0'), printf(" %c", wf.query[q]);
-	printf("\n ");
-	for(q = 0, q_end = wf.query_length + 1; q < q_end; q++)
-		printf(" %u", wf.table.data[q]);
-	printf("\n");
-	for(c = 0; c < candidate_length; c++) {
-		assert(candidate[c] != '\0'), printf("%c", candidate[c]);
-		for(q_end = (c + 2) * (wf.query_length + 1);
-			q < q_end; q++) printf(" %u", wf.table.data[q]);
-		if(c >= wf.query_length) printf("--");
-		printf("\n");
-	}
-#endif
 }
 /** Called from <fn:path_dfs>. Add to `path`, `bit`, which must be strictly
  monotonic with other bits, `n0` >= `n1`, branch indices, and `i`, leaf
@@ -586,14 +572,14 @@ finally:
 /** Consumes `p.nodes` and `p.byte` and requires that `p.trie` is be non-empty.
  Given a `key`, stores every choice made, only given the index, ignoring don't
  care bits. If given `key` in `p`, it will find the path to it; `key` not in
- `p`, it will find a path to some element in `p`.
+ `p`, it will find a path to some element in `p`. The stored entry is at
+ `p.dict.leaves.data[p.nodes.data[p.nodes.size - 1].i]`.
  @order \O(`key.length`) @return Success. */
 static int path_dfs(struct Path *const p, const char *const key) {
 	size_t n0 = 0, n1 = p->dict.branches.size, i = 0, left, right;
 	size_t branch;
 	size_t byte, key_byte = 0, bit = 0;
 	struct Node *node;
-	printf("node_dfs %s\n", key);
 	assert(key && p && n1 + 1 == p->dict.leaves.size); /* Full binary tree. */
 	/* Clear temp nodes and bytes. (fixme: don't have to clear all.) */
 	node_array_clear(&p->nodes);
@@ -615,7 +601,7 @@ static int path_dfs(struct Path *const p, const char *const key) {
 	 the paths to find the shortest, greedily take the one with the least
 	 children. Statistically the best choice without looking at them, though
 	 is a poor guess practically in most dictionaries because words have a lot
-	 of redundant information. */
+	 of redundant information; otoh, this is probably mot the closest anyway. */
 	while((node = path_new_node(p, bit, n0, n1, i)) && n0 < n1) {
 		branch = p->dict.branches.data[n0];
 		bit += trie_skip(branch);
@@ -633,63 +619,75 @@ catch:
 finally:
 	return assert(n0 == n1), 1;
 }
-
-
-
-
-#if 0
-static int wagner_fischer_words(struct Path *const p) {
-	const size_t candidate_length = strlen(candidate); /* Vertical. */
+static void path_wf_print(const struct Path *const p) {
+	size_t r, r_end, c;
+	assert(p->row && p->column && p->table.size
+		== (p->row_length + 1) * (p->column_length + 1));
+	printf("   ");
+	for(r = 0, r_end = p->row_length; r < r_end; r++)
+		assert(p->row[r] != '\0'), printf(" %c", p->row[r]);
+	printf("\n ");
+	for(r = 0, r_end = p->row_length + 1; r < r_end; r++)
+		printf(" %u", p->table.data[r]);
+	printf("\n");
+	for(c = 0; c < p->column_length; c++) {
+		assert(p->column[c] != '\0'), printf("%c", p->column[c]);
+		for(r_end = (c + 2) * (p->row_length + 1); r < r_end; r++)
+			printf(" %u", p->table.data[r]);
+		printf("\n");
+	}
+}
+static int path_wagner_fischer(struct Path *const p) {
 	size_t table_size, i, c, q;
 	/* Contains excepts from 2019 Fujimoto Seiji <fujimoto@ceptord.net>. Can We
 	 Optimize the Wagner-Fischer Algorithm? placed in public domain. */
 	uint8_t u, v;
-	assert(path.trie
-		&& candidate && candidate_length < 256
-		&& wf.query  && wf.query_length  < 256);
-	printf("wagner fischer word: %s(%lu), %s(%lu)\n",
-		wf.query, wf.query_length, candidate, candidate_length);
+	/* @fixme This is not enough to guarantee bounds. */
+	assert(p->dict.leaves.size
+		&& p->row && p->row_length < 256
+		&& p->column && p->column_length < 256);
+	printf("path wagner fischer, row: %s(%lu), column: %s(%lu)\n",
+		p->row, p->row_length, p->column, p->column_length);
 	/* Horizontal \times vertical. */
-	table_size = (wf.query_length + 1) * (candidate_length + 1);
-	byte_array_clear(&wf.table);
-	if(!byte_array_reserve(&wf.table, table_size)) return 0;
-	wf.table.size = table_size;
+	table_size = (p->row_length + 1) * (p->column_length + 1);
+	byte_array_clear(&p->table);
+	if(!byte_array_reserve(&p->table, table_size)) return 0;
+	p->table.size = table_size;
 	/* debug: fill. */
-	for(i = 0; i < table_size; i++) wf.table.data[i] = 42;
-	wf.common = 0;
+	for(i = 0; i < table_size; i++) p->table.data[i] = 42;
+	p->common = 0;
 	/* Fill the first row. */
-	for(i = 0; i <= wf.query_length; i++) wf.table.data[i] = i;
+	for(i = 0; i <= p->row_length; i++) p->table.data[i] = i;
 	/* Fill all others. */
-	for(c = 0; c < candidate_length; c++) {
+	for(c = 0; c < p->column_length; c++) {
 		/* Fill the first of the row. */
-		wf.table.data[i++] = c + 1;
-		for(q = 0; q < wf.query_length; q++) {
+		p->table.data[i++] = c + 1;
+		for(q = 0; q < p->row_length; q++) {
 			/* @fixme Implement Ukkonen's optimisation?
 			 @fixme Abs min at right, done? */
-			if(wf.query[q] == candidate[c]) {
-				u = wf.table.data[i - wf.query_length - 2]; /* Diagonal. */
-				wf.table.data[i++] = u;
-				if(!u) wf.common++;
+			if(p->row[q] == p->column[c]) {
+				u = p->table.data[i - p->row_length - 2]; /* Diagonal. */
+				p->table.data[i++] = u;
+				if(!u) p->common++;
 			} else {
-				u = wf.table.data[i - 1]; /* Left. */
-				v = wf.table.data[i - wf.query_length - 1]; /* Top. */
+				u = p->table.data[i - 1]; /* Left. */
+				v = p->table.data[i - p->row_length - 1]; /* Top. */
 				if(u > v) u = v;
-				v = wf.table.data[i - wf.query_length - 2]; /* Diagonal. */
+				v = p->table.data[i - p->row_length - 2]; /* Diagonal. */
 				if(u > v) u = v;
-				wf.table.data[i++] = u + 1;
+				p->table.data[i++] = u + 1;
 			}
 		}
-		if(c + 2 > wf.query_length);
+		/*if(c + 2 > p->row_length); ... */
 	}
-	wf_print(candidate);
+	p->ld = i ? p->table.data[i - 1] : 0;
 	return 1;
 }
-#endif
+
 
 
 
 #if 0
-
 /* Wagner-Fischer (Memory Reduction + Branch Pruning.) From 2019 Fujimoto Seiji
  <fujimoto@ceptord.net>: Can We Optimize the Wagner-Fischer Algorithm? placed
  in public domain. `a_str` is length `a_len` and `b_str` is length `b_len`.
@@ -750,7 +748,6 @@ static unsigned wagner_fischer_o2(const char *const a_str, const unsigned a_len,
 	dia = buf[b_len];
 	return dia;
 }
-
 /* Calls <fn:wagner_fisher_o2> with the order correct. */
 static int wagner_fischer_do(const char *const a, const char *const b,
 	unsigned *const result) {
@@ -767,7 +764,6 @@ static int wagner_fischer_do(const char *const a, const char *const b,
 	}
 	return 1;
 }
-
 #endif
 
 
@@ -781,8 +777,7 @@ static int wagner_fischer_do(const char *const a, const char *const b,
  `p.closest` or `!p.closest.size` if `query` was actually in `p`.
  @return Success. */
 static int geodesics(struct Path *const p, const char *const query) {
-	Leaf *leaf;
-	unsigned lev;
+	Leaf *leaf, candidate;
 
 	printf("geodesics(%s).\n", query);
 	/* Initialise suggestions. */
@@ -793,13 +788,20 @@ static int geodesics(struct Path *const p, const char *const query) {
 	if(trie_get(&p->dict, query)) return 1;
 
 	/* Greedy educated guess to serve as the starting point. */
-	if(!path_dfs(p, query)
-		|| !(leaf = leaf_array_new(&p->closest))) return 0;
+	if(!path_dfs(p, query)) return 0;
+	candidate = p->dict.leaves.data[p->nodes.data[p->nodes.size - 1].i];
 	path_print(p);
-	assert(p->nodes.size && p->nodes.data[p->nodes.size - 1].n0
-		== p->nodes.data[p->nodes.size - 1].n1);
-	*leaf = p->dict.leaves.data[p->nodes.data[p->nodes.size - 1].i];
-	printf("common: %u\n", p->common);
+	if(!(leaf = leaf_array_new(&p->closest))) return 0;
+	*leaf = candidate;
+
+	/* Do Wagner-Fisher. */
+	p->row = query;
+	if((p->row_length = strlen(query)) > 255) return 1;
+	p->column = candidate;
+	if((p->column_length = strlen(candidate)) > 255) return 1;
+	if(!path_wagner_fischer(p)) return 0;
+	path_wf_print(p);
+	printf("ld: %u, common: %u.\n", p->ld, p->common);
 
 	/*if(wagner_fischer_do(query, *leaf, &lev))
 		printf("wf do: %u\n", lev);
