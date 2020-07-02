@@ -516,10 +516,10 @@ static void path_print(const struct Path *const p) {
 	size_t next, max, i = 0;
 	struct Node *n;
 	assert(p);
-	printf("byte:");
+	printf("Path byte:");
 	for(next = 0; next < p->next.size; next++)
 		printf(" %lu:%lu", next, p->next.data[next]);
-	printf(" what it looks like:\n");
+	printf(" looks like:\n");
 	for(next = 0; next < p->next.size; next++) {
 		max = p->next.data[next], assert(max <= p->nodes.size);
 		printf("__ byte %lu (bits %lu--%lu) max %lu __\n",
@@ -615,7 +615,9 @@ static int path_dfs(struct Path *const p, const char *const key) {
 	goto finally;
 	/* End of `key` and still in the internal nodes. Instead of calculating all
 	 the paths to find the shortest, greedily take the one with the least
-	 children, (statistically the best choice without looking at them.) */
+	 children. Statistically the best choice without looking at them, though
+	 is a poor guess practically in most dictionaries because words have a lot
+	 of redundant information. */
 	while((node = path_new_node(p, bit, n0, n1, i))
 		&& (printf("node_dfs loop2 [%lu,%lu]\n", n0, n1),
 		n0 < n1)) {
@@ -623,7 +625,7 @@ static int path_dfs(struct Path *const p, const char *const key) {
 		bit += trie_skip(branch);
 		left = trie_left(branch);
 end_key:
-		assert(n1 > n0 + 1 + left);
+		assert(n1 > n0 + left);
 		right = n1 - n0 - 1 - left;
 		if(!(node->choice = right < left)) n1 = ++n0 + left;
 		else n0 += left + 1, i += left + 1;
@@ -976,8 +978,11 @@ int main(void) {
 "skrieghs","smouldry","crower","pellicles","sapucaias","underuses","reexplored",
 "chlamydia","tragediennes","levator","accipiter","esquisses","intentnesses",
 "julienning","tetched","creeshing","anaphrodisiacs","insecurities","tarpons",
-"lipotropins","sinkage","slooshes","homoplastic","feateous"};
-	const size_t words_size = sizeof words / sizeof *words;
+"lipotropins","sinkage","slooshes","homoplastic","feateous"},
+		*const look[] = { "trie", "a", "sub" };
+	const size_t words_size = sizeof words / sizeof *words,
+		look_size = sizeof look / sizeof *look;
+	size_t i;
 	struct Path p;
 	Leaf word;
 	int success = EXIT_FAILURE;
@@ -985,18 +990,19 @@ int main(void) {
 	if(!path(&p, words, words_size)) goto catch;
 	trie_print(&p.dict);
 	trie_graph(&p.dict, "graph/dictionary.gv");
-	word = "trie";
-	if(!geodesics(&p, word)) goto catch;
-	if(!p.closest.size) {
-		printf("%s spelt correctly.\n", word);
-	} else {
-		size_t i;
-		printf("Dictionary words closest to %s:", word);
-		for(i = 0; i < p.closest.size; i++)
-			printf(" %s", p.closest.data[i]);
-		printf(".\n");
+	for(i = 0; i < look_size; i++) {
+		word = look[i];
+		if(!geodesics(&p, word)) goto catch;
+		if(!p.closest.size) {
+			printf("%s spelt correctly.\n", word);
+		} else {
+			size_t j;
+			printf("Dictionary words closest to %s:", word);
+			for(j = 0; j < p.closest.size; j++)
+				printf(" %s", p.closest.data[j]);
+			printf(".\n");
+		}
 	}
-
 	success = EXIT_SUCCESS;
 	goto finally;
 catch:
