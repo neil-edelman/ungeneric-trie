@@ -463,71 +463,113 @@ static int trie_remove(struct Trie *const t, const char *const key) {
 }
 
 
+
+
+/* This is Trie /\. This is spell check, which depends on Trie \/. */
+
+
+
+
 /** This saves the position in the trie, bit-by-bit. */
 struct Node { size_t bit, n0, n1, i; enum { LEFT, RIGHT, LEAF } choice; };
 
 DEFINE_MIN_ARRAY(node, Node, struct Node)
 
-struct TriePath {
-	const struct Trie trie; /* Pointers to words in order and branches. */
-	struct NodeArray nodes; /* Path to currently selected word. */
+DEFINE_MIN_ARRAY(byte, Byte, uint8_t)
+
+struct Path {
+	struct Trie trie; /* Pointers to words in order and branches. */
+	struct NodeArray nodes; /* Path to `select`. */
 	struct SizeArray byte;  /* Bytes in `nodes`. */
+	const char *query, *select;
+	size_t query_length, select_length;
+	unsigned ld, common; /* Levenshtein, common bytes, of `query`, `select`. */
+	struct LeafArray closest; /* Current suggestions with `levenshtein`. */
+	struct ByteArray table; /* DP matrix `query_length` x `select_length`. */
 };
 
-static void path_(struct TriePath *const path) {
-	assert(path);
-	node_array_(&path->nodes);
-	size_array_(&path->byte);
+/** Initialise `path` with `a` of `a_size`. */
+static int path(struct Path *const p, const Leaf *const a,
+	const size_t a_size) {
+	assert(p && a && a_size);
+	trie(&p->trie);
+	node_array(&p->nodes);
+	size_array(&p->byte);
+	p->query = p->select = 0;
+	p->query_length = p->select_length = 0;
+	p->ld = p->common = 0;
+	leaf_array(&p->closest);
+	byte_array(&p->table);
+	return trie_init(&p->trie, a, a_size, 0);
 }
 
-static void path_clear(struct TriePath *const path) {
-	assert(path);
-	node_array_clear(&path->nodes);
-	size_array_clear(&path->byte);
+/** Destroy `p`. */
+static void path_(struct Path *const p) {
+	assert(p);
+	trie_(&p->trie);
+	node_array_(&p->nodes);
+	size_array_(&p->byte);
+	leaf_array_(&p->closest);
+	byte_array_(&p->table);
+}
+
+/**  */
+static void path_new(struct Path *const p) {
+	assert(p);
+	node_array_clear(&p->nodes);
+	size_array_clear(&p->byte);
+}
+/** Initialise Wagner-Fisher with `query`. */
+static void wagner_fischer(const char *const query) {
+	assert(query);
+	wf.query = query;
+	wf.query_length = strlen(query), assert(wf.query_length < 256); /* Bytes. */
+	leaf_array_clear(&wf.closest);
+	byte_array_clear(&wf.table);
+	path_clear(&wf.path);
 }
 
 /** Add to `path`, `bit`, which must be strictly monotonic with other bits,
  `n0` >= `n1`, branch indices, and `i`, leaf index. */
-static struct Node *path_new(struct TriePath *const path, const size_t bit,
+static struct Node *path_new(struct Path *const p, const size_t bit,
 	const size_t n0, const size_t n1, const size_t i) {
 	struct Node *node;
 	const size_t byte = bit >> 3;
 	printf("path_new bit %lu byte %lu: [%lu, %lu], leaf %lu.\n",
 		bit, byte, n0, n1, i);
-	assert(path && (!path->byte.size
-		|| path->byte.data[path->byte.size - 1] <= byte) && n0 <= n1);
-	node = node_array_new(&path->nodes);
+	assert(p && (!p->byte.size
+		|| p->byte.data[p->byte.size - 1] <= byte) && n0 <= n1);
+	node = node_array_new(&p->nodes);
 	node->bit = bit;
 	node->n0  = n0;
 	node->n1  = n1;
 	node->i   = i;
 	node->choice = LEAF;
 	/* Expand `byte` to include `bit`. Is sort of a hash, bits in bytes. */
-	if(path->byte.size == byte + 1) goto finally;
-	assert(path->byte.size < byte + 1);
-	if(!size_array_reserve(&path->byte, byte + 1)) return 0;
-	while(byte >= path->byte.size) path->byte.data[path->byte.size++] = byte;
+	if(p->byte.size == byte + 1) goto finally;
+	assert(p->byte.size < byte + 1);
+	if(!size_array_reserve(&p->byte, byte + 1)) return 0;
+	while(byte >= p->byte.size) p->byte.data[p->byte.size++] = byte;
 finally:
 	return node;
 }
-
 
 /** In `t`, which must be non-empty, given a `key`, stores every choice made,
  only given the index, ignoring don't care bits. If given `key` in `t`, it will
  find the path to it, and `key` not in `t`, it will find a path to some element
  in `t`. @order \O(`key.length`) @return Success. */
 static int path_key(const struct Trie *const t, const char *const key,
-	struct TriePath *const path) {
+	struct Path *const p) {
 	size_t n0 = 0, n1 = t->branches.size, i = 0, left, right;
 	size_t branch;
 	size_t byte, key_byte = 0, bit = 0;
 	struct Node *node;
 	printf("node_key %s\n", key);
-	assert(t && key && path);
-	path_clear(path);
+	assert(t && key && p);
+	path_clear(p);
 	assert(n1 + 1 == t->leaves.size); /* Full binary tree. */
 	/* Descend the trie normally, storing the nodes. */
-	while((node = path_new(path, bit, n0, n1, i))
+	while((node = path_new(p, bit, n0, n1, i))
 		&& (printf("node_key1 [%lu,%lu]\n", n0, n1),
 		n0 < n1)) {
 		branch = t->branches.data[n0];
@@ -544,7 +586,7 @@ static int path_key(const struct Trie *const t, const char *const key,
 	/* End of `key` and still in the internal nodes. Instead of calculating all
 	 the paths to find the shortest, greedily take the one with the least
 	 children, (statistically the best choice without looking at them.) */
-	while((node = path_new(path, bit, n0, n1, i))
+	while((node = path_new(p, bit, n0, n1, i))
 		&& (printf("node_key2 [%lu,%lu]\n", n0, n1),
 		n0 < n1)) {
 		branch = t->branches.data[n0];
@@ -565,58 +607,29 @@ finally:
 }
 
 
-/* Memory for dynamic programming. */
-DEFINE_MIN_ARRAY(byte, Byte, uint8_t)
 
 
-/** `table.size` == `entries.size` * `query_length`. */
-static struct {
-	const char *query;
-	size_t query_length, closest_length, common;
-	struct LeafArray closest; /* Current suggestions with `closest_length`. */
-	struct ByteArray table; /* DP matrix `query_length` columns. */
-	struct TriePath path;
-} wf;
-
-static void path_print(void) {
+static void path_print(const struct Path *const p) {
 	size_t byte, max, i = 0;
 	struct Node *n;
-	for(byte = 0; byte < wf.path.byte.size; byte++) {
-		max = wf.path.byte.data[byte], assert(max <= wf.path.nodes.size);
+	assert(p);
+	for(byte = 0; byte < p->byte.size; byte++) {
+		max = p->byte.data[byte], assert(max <= p->nodes.size);
 		printf("__ byte %lu (bits %lu--%lu) __\n",
 			byte, byte << 3, (byte << 3) + 7);
 		while(i < max) {
-			n = wf.path.nodes.data + i++;
+			n = p->nodes.data + i++;
 			printf(" [%lu,%lu], leaf %lu, choice %u\n",
 				n->n0, n->n1, n->i, n->choice);
 		}
 	}
 	printf("__ the rest __\n");
-	while(i < wf.path.nodes.size) {
-		n = wf.path.nodes.data + i++;
+	while(i < p->nodes.size) {
+		n = p->nodes.data + i++;
 		printf(" [%lu,%lu], leaf %lu, choice %u\n",
 			n->n0, n->n1, n->i, n->choice);
 	}
-}
 
-/** Destroy memory associated to Wagner-Fisher. */
-static void wagner_fischer_(void) {
-	leaf_array_(&wf.closest);
-	byte_array_(&wf.table);
-	path_(&wf.path);
-}
-
-/** Initialise Wagner-Fisher with `query`. */
-static void wagner_fischer(const char *const query) {
-	assert(query);
-	wf.query = query;
-	wf.query_length = strlen(query), assert(wf.query_length < 256); /* Bytes. */
-	leaf_array_clear(&wf.closest);
-	byte_array_clear(&wf.table);
-	path_clear(&wf.path);
-}
-
-static void wf_print(const char *const candidate) {
 	size_t candidate_length = strlen(candidate);
 	size_t q, q_end, c;
 	assert(candidate && wf.table.size
@@ -969,11 +982,12 @@ int main(void) {
 	const size_t words_size = sizeof words / sizeof *words,
 		extra_size = sizeof extra / sizeof *extra;
 	size_t start, end, i;
+	struct Path p;
 	struct Trie t;
 	Leaf leaf, eject;
 	Leaf word;
 	int success = EXIT_FAILURE;
-	if(!trie_init(&t, words, words_size, 0)) goto catch;
+	if(!trie_init(&t.path.trie, words, words_size, 0)) goto catch;
 
 	/* Test initialistion. */
 	trie_print(&t);
