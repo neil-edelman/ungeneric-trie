@@ -564,8 +564,8 @@ static struct Node *path_new_node(struct Path *const p, const size_t bit,
 	const size_t n0, const size_t n1, const size_t i) {
 	struct Node *node;
 	const size_t byte = bit >> 3;
-	printf("path_new bit %lu byte %lu: [%lu, %lu], leaf %lu.\n",
-		bit, byte, n0, n1, i);
+	/*printf("path_new bit %lu byte %lu: [%lu, %lu], leaf %lu.\n",
+		bit, byte, n0, n1, i);*/
 	assert(p && (!p->next.size
 		|| p->next.data[p->next.size - 1] < p->nodes.size) && n0 <= n1);
 	node = node_array_new(&p->nodes);
@@ -575,7 +575,7 @@ static struct Node *path_new_node(struct Path *const p, const size_t bit,
 	node->i   = i;
 	node->choice = LEAF;
 	/* Expand `next` to include `byte`. Is sort of a hash. */
-	if(p->next.size == byte) { printf("already\n"); goto finally; }
+	if(p->next.size == byte) goto finally;
 	assert(p->next.size < byte);
 	if(!size_array_reserve(&p->next, byte)) return 0;
 	while(p->next.size < byte) p->next.data[p->next.size++]
@@ -599,9 +599,7 @@ static int path_dfs(struct Path *const p, const char *const key) {
 	node_array_clear(&p->nodes);
 	size_array_clear(&p->next);
 	/* Descend the trie normally, storing the nodes. */
-	while((node = path_new_node(p, bit, n0, n1, i))
-		&& (printf("node_dfs loop1 [%lu,%lu]\n", n0, n1),
-		n0 < n1)) {
+	while((node = path_new_node(p, bit, n0, n1, i)) && n0 < n1) {
 		branch = p->dict.branches.data[n0];
 		bit += trie_skip(branch);
 		left = trie_left(branch);
@@ -618,9 +616,7 @@ static int path_dfs(struct Path *const p, const char *const key) {
 	 children. Statistically the best choice without looking at them, though
 	 is a poor guess practically in most dictionaries because words have a lot
 	 of redundant information. */
-	while((node = path_new_node(p, bit, n0, n1, i))
-		&& (printf("node_dfs loop2 [%lu,%lu]\n", n0, n1),
-		n0 < n1)) {
+	while((node = path_new_node(p, bit, n0, n1, i)) && n0 < n1) {
 		branch = p->dict.branches.data[n0];
 		bit += trie_skip(branch);
 		left = trie_left(branch);
