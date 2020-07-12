@@ -1,10 +1,18 @@
-/** @license 2020 Neil Edelman,
- [MIT License](https://opensource.org/licenses/MIT).
- @subtitle Prefix Tree
+/* I initially thought to improve the lookup of a hashed of string by only storing the difference between the strings in a dynamic hash function, similar to [HAMT](Bagwell?Ideal). Taking this idea to it's end, I was thinking of was a binary (PATRICiA)[Morrison1968PATRICIA] prefix-tree data-structure. There is a good example of PATRICiA trees in [Crochemore, Lecroq, 2009 Trie], except they have the byte-order flipped.
 
- @fixme Don't put two strings side-by-side or delete one that causes two
- strings to be side-by-side that have more than 512 matching characters in the
- same bit-positions, it will trip an `assert`. (Genomic data, perhaps?) */
+
+ 
+ Usually this structure is formed by interconnected nodes (or tables in old literature, something like an automaton) that gives it good insertion and deletion times. I was thinking of a data structure with lots of lookups and relatively few modifications, so I used two dynamic arrays. These are dominated by `O(n)` to insert or remove, but the upside is you have random access to all the pointers, necessarily in order and compactified?. Downside is it's limited by `O(n)` modification performance that will get you sometime.
+ 
+ 
+ 
+ It's 400 LOC on top of 200 testing, which is more than I'd ask anyone to review in detail, so I'll give you an overview.
+ - An X-Macro for a dynamic array.
+ - The internal nodes, or branches array. This is part of a full binary tree in semi-implicit form. Each entry represents a node, storing two items of information packed into a `size_t`: `skip` is how many bits are don't cares before we arrive at a decision bit, and `left`, how many branches are descended on the left from this node. Traversing the tree from the root, we keep track of left (`n0 + 1`) and right (`n1`) of the sub-tree rooted at `n0`.
+
+ Before I had a fixed 512-byte limit on `bit`. I was going though some papers on the subject and now I use `skip`. which can expand to the limits of the computer, but only 512 bytes between levels on the tree. I assert that this holds, but really I should check and not allow it to get in an inconsistent state. ([Ziv-Lempel compression tree](Naverro2004), [Genomic data](WilliamsZobel??).) However, it gets even harder when I merge two `skip` values on delete; am I supposed to say that this entry could not be deleted because it would overflow?
+
+ */
 
 #include <stdlib.h> /* EXIT malloc free qsort */
 #include <stdio.h>  /* printf */
@@ -12,63 +20,61 @@
 #include <assert.h> /* assert */
 #include <errno.h>  /* errno */
 #include <limits.h> /* INT_MAX */
-/* Added in `C99` and doesn't guarantee `uint64_t`; can be replaced with
- `typedef` these machine-dependant types. */
-#include <stdint.h> /* uint8_t uint64_t */
-#include "Trie.h" /* \include */
 
-/** Orders `a` and `b`. @implements qsort bsearch */
-static int vstrcmp(const void *const a, const void *const b)
-	{ return strcmp(*(char **)a, *(char **)b); }
 
-/** Returns a boolean given two `Leaf`. */
-typedef int (*TrieBipredicate)(Leaf, Leaf);
-
-MIN_ARRAY_FNS(leaf, Leaf, Leaf)
-
-/** For each consecutive pair of equal elements in `a`, surjects two one
- according to `merge`.
- @param[merge] If null, discards all but the first. @order \O(`a.size`) */
-static void leaf_compactify(struct LeafArray *const a,
-	const TrieBipredicate merge) {
-	size_t target, from, cursor, choice, next, move;
-	const size_t last = a->size;
-	int is_first, is_last;
-	assert(a);
-	for(target = from = cursor = 0; cursor < last; cursor += next) {
-		/* Bijective `[from, cursor)` is moved lazily. */
-		for(choice = 0, next = 1; cursor + next < last &&
-			!strcmp(a->data[cursor + choice], a->data[cursor + next]); next++)
-			if(merge && merge(a->data[cursor + choice], a->data[cursor + next]))
-			choice = next;
-		if(next == 1) continue;
-		/* Must move injective `cursor + choice \in [cursor, cursor + next)`. */
-		is_first = !choice;
-		is_last  = (choice == next - 1);
-		move = cursor - from + is_first;
-		memmove(a->data + target, a->data + from, sizeof *a->data * move),
-		target += move;
-		if(!is_first && !is_last) memcpy(a->data + target,
-			a->data + cursor + choice, sizeof *a->data), target++;
-		from = cursor + next - is_last;
-	}
-	/* Last differed move. */
-	move = last - from;
-	memmove(a->data + target, a->data + from, sizeof *a->data * move),
-	target += move, assert(a->size >= target);
-	a->size = target;
+/* X-macro for a minimal dynamic array. */
+#define MIN_ARRAY(name, Name, type) \
+struct Name##Array { type *data; size_t size, capacity; }; \
+/* Initialises `a` to idle. */ \
+static void name##_array(struct Name##Array *const a) \
+	{ assert(a), a->data = 0, a->capacity = a->size = 0; } \
+/* Destroys `a` and returns it to idle. */ \
+static void name##_array_(struct Name##Array *const a) \
+	{ assert(a), free(a->data), name##_array(a); } \
+/* Ensures `min_capacity` of `a`. @param[min_capacity] If zero, does nothing.
+@return Success; otherwise, `errno` will be set.
+@throws[ERANGE] Tried allocating more then can fit in `size_t` or `realloc`
+doesn't follow POSIX. @throws[realloc, ERANGE] */ \
+static int name##_array_reserve(struct Name##Array *const a, \
+	const size_t min_capacity) { \
+	size_t c0; \
+	type *data; \
+	const size_t max_size = (size_t)-1 / sizeof *a->data; \
+	assert(a); \
+	if(a->data) { \
+		if(min_capacity <= a->capacity) return 1; \
+		c0 = a->capacity; \
+		if(c0 < 8) c0 = 8; \
+	} else { /* Idle. */ \
+		if(!min_capacity) return 1; \
+		c0 = 8; \
+	} \
+	if(min_capacity > max_size) return errno = ERANGE, 0; \
+	/* `c_n = a1.625^n`, approximation golden ratio `\phi ~ 1.618`. */ \
+	while(c0 < min_capacity) { \
+		size_t c1 = c0 + (c0 >> 1) + (c0 >> 3); \
+		if(c0 >= c1) { c0 = max_size; break; } \
+		c0 = c1; \
+	} \
+	if(!(data = realloc(a->data, sizeof *a->data * c0))) \
+		{ if(!errno) errno = ERANGE; return 0; } \
+	a->data = data, a->capacity = c0; \
+	return 1; \
+} \
+/* @return Push back a new un-initialized datum of `a`.
+ @throws[realloc, ERANGE] */ \
+static type *name##_array_new(struct Name##Array *const a) { \
+	assert(a); \
+	return name##_array_reserve(a, a->size + 1) ? a->data + a->size++ : 0; \
 }
 
 
-/* Trie pre-order internal nodes in the style of <Morrison, 1968 PATRICiA>
- semi-implicitly. Each contains two items of information in a `size_t`: left
- children branches are <fn:trie_left> immediately following, right children are
- the rest, and <fn:trie_skip>, the length in bits of the don't care values
- preceding this branch in the string. */
-MIN_ARRAY_FNS(size, Size, size_t)
+/* Trie pre-order internal nodes in the style of <Morrison, 1968 PATRICiA>. */
+MIN_ARRAY(size, Size, size_t)
 
 /* 12 makes the maximum skip length 512 bytes and the maximum size of a trie is
- `size_t` 64-bits: 4503599627370495, 32-bits: 1048575, and 16-bits: 15. */
+ `size_t` 64-bits: 4503599627370495, 32-bits: 1048575, 16-bits: 15, 8-bits: not
+ supported at all, sorry, (unlikely since `C++` has additional constraints.) */
 #define TRIE_SKIP 12
 #define TRIE_SKIP_MAX ((1 << TRIE_SKIP) - 1)
 #define TRIE_LEFT_MAX (((size_t)1 << ((sizeof(size_t) << 3) - TRIE_SKIP)) - 1)
@@ -93,7 +99,9 @@ static void trie_skip_set(size_t *const branch, size_t skip) {
 	*branch += skip;
 }
 
-/** Increments the left descendants `branch` count. */
+/** Increments the left descendants `branch` count. @fixme This will trip an
+ `assert` if two strings have subsequences that are equal in more than 2^12
+ bits and then different. */
 static void trie_left_inc(size_t *const branch) {
 	assert(branch && *branch < ~(size_t)TRIE_SKIP_MAX);
 	*branch += TRIE_SKIP_MAX + 1;
@@ -130,6 +138,18 @@ static int trie_is_prefix(const char *a, const char *b) {
 }
 
 
+/** Leaves are string constants necessarily in lexicographic order; `typedef`
+ because it could be a more complex structure like an associative array. */
+typedef const char *Leaf;
+
+MIN_ARRAY(leaf, Leaf, Leaf)
+
+
+/** Trie is a full binary tree; it's either empty or
+ `|branches| + 1 = |leaves|`. The reason we spilt branches and leaves is it's
+ `O(1)` to check the leftmost leaf of a branch, which we do on insertion. */
+struct Trie { struct SizeArray branches; struct LeafArray leaves; };
+
 /** Initialises `t` to idle. */
 static void trie(struct Trie *const t)
 	{ assert(t); size_array(&t->branches), leaf_array(&t->leaves); }
@@ -137,6 +157,10 @@ static void trie(struct Trie *const t)
 /** Returns an initialised `t` to idle. */
 static void trie_(struct Trie *const t)
 	{ assert(t); size_array_(&t->branches), leaf_array_(&t->leaves); }
+
+/** Orders `a` and `b` used in <fn:trie_init>. @implements qsort bsearch */
+static int vstrcmp(const void *const a, const void *const b)
+	{ return strcmp(*(char **)a, *(char **)b); }
 
 /** Recursive function used for <fn:trie_init>. Initialise branches of `t`
  up to `bit` with `a` to `a_size` array of sorted leaves.
@@ -166,12 +190,13 @@ static void trie_init_branches_r(struct Trie *const t, size_t bit,
 	trie_init_branches_r(t, bit, b, a_size - b_size);
 }
 
-/** Initialises `t` to `a` of size `a_size`, which cannot be zero.
- @param[merge] Called with any duplicate entries and replaces if true; if
- null, doesn't replace. @return Success. @throws[ERANGE, malloc]
+/** Initialises `t` to `a` of size `a_size`, which cannot be zero. For code
+ brevity, all entries of `a` have to be unique. If this is not the case, the
+ strings will happily go past the null and cause undefined behaviour.
+ @return Success. @throws[ERANGE, malloc]
  @fixme There's a better way to do this somewhere in the literature? */
 static int trie_init(struct Trie *const t, const Leaf *const a,
-	const size_t a_size, const TrieBipredicate merge) {
+	const size_t a_size) {
 	Leaf *leaves;
 	assert(t && a && a_size);
 	trie(t);
@@ -183,7 +208,7 @@ static int trie_init(struct Trie *const t, const Leaf *const a,
 	t->leaves.size = a_size;
 	/* Sort, get rid of duplicates, and initialise branches. */
 	qsort(leaves, a_size, sizeof *a, &vstrcmp);
-	leaf_compactify(&t->leaves, merge);
+	/* fixme: this is where we de-duplicate `t->leaves`; left out. */
 	trie_init_branches_r(t, 0, 0, t->leaves.size);
 	assert(t->branches.size + 1 == t->leaves.size);
 	return 1;
@@ -191,8 +216,8 @@ static int trie_init(struct Trie *const t, const Leaf *const a,
 
 /** Looks at only the index for potential matches.
  @param[result] A index pointer to leaves that matches `key` when true.
- @return True if `key` in `trie` has matched, otherwise `key` is definitely is
- not in `trie`. @order \O(`key.length`) */
+ @return True if `key` in `trie` may have matched, otherwise `key` is
+ definitely is not in `trie`. @order \O(`key.length`) */
 static int param_index_get(const struct Trie *const t, const char *const key,
 	size_t *const result) {
 	/* `(n0, n1]` is the index of pre-order `ancestor` (`n0`) and all
@@ -227,7 +252,6 @@ static int param_get(const struct Trie *const t,
 		&& !strcmp(t->leaves.data[*result], key);
 }
 
-#if 1 /* <!-- unused */
 /** @return `t` entry that matches trie bits of `key`, (ignoring the don't care
  bits,) or null if either `key` didn't have the length to fully differentiate
  more then one entry or the `trie` is empty. */
@@ -235,7 +259,6 @@ static int param_get(const struct Trie *const t,
 	size_t i;
 	return param_index_get(t, key, &i) ? t->leaves.data[i] : 0;
 }
-#endif /* unused --> */
 
 /** @return Exact match for `key` in `t` or null. */
 static Leaf trie_get(const struct Trie *const t, const char *const key) {
@@ -279,11 +302,10 @@ static int trie_prefix(const struct Trie *const t, const char *const prefix,
 }
 
 /** Add `datum` to `t`. Must not be the same as any key of trie; it does not
- check for the end of the string. @return Success. @order \O(|`t`|)
+ check for the end of the string. @return Success. @order \O(`t.size`)
  @throws[ERANGE] Trie reached it's conservative maximum, which on machines
  where the pointer is 64-bits, is 4.5T. On 32-bits, it's 1M.
- @throws[realloc, ERANGE] @fixme Throw EILSEQ if two strings have subsequences
- that are equal in more than 2^12 bits. */
+ @throws[realloc, ERANGE] */
 static int trie_add_unique(struct Trie *const t, Leaf datum) {
 	const size_t leaf_size = t->leaves.size, branch_size = leaf_size - 1;
 	size_t n0 = 0, n1 = branch_size, i = 0, left, bit = 0, bit0 = 0, bit1;
@@ -303,7 +325,6 @@ static int trie_add_unique(struct Trie *const t, Leaf datum) {
 		|| !size_array_reserve(&t->branches, branch_size + 1)) return 0;
 	/* Branch from internal node. */
 	while(branch = t->branches.data + n0, n0_key = t->leaves.data[i], n0 < n1) {
-		/* fixme: Detect overflow 12 bits between. */
 		for(bit1 = bit + trie_skip(*branch); bit < bit1; bit++)
 			if((cmp = trie_strcmp_bit(datum, n0_key, bit)) != 0) goto insert;
 		bit0 = bit1;
@@ -335,6 +356,9 @@ insert:
 	return 1;
 }
 
+/** Returns a boolean given two `Leaf`. Used for <fn:trie_put>. */
+typedef int (*TrieBipredicate)(Leaf, Leaf);
+
 /** Adds `key` to `t` and, if `eject` is non-null, stores the collided element,
  if any, as long as `replace` is null or returns true.
  @param[eject] If not-null, the ejected datum. If `replace` returns false, then
@@ -361,8 +385,7 @@ static int trie_put(struct Trie *const t, Leaf key,
 	return 1;
 }
 
-/** @return Whether leaf index `i` has been removed from `t`.
- @fixme There is nothing stopping an `assert` from being triggered. */
+/** @return Whether leaf index `i` has been removed from `t`. */
 static int index_remove(struct Trie *const t, size_t i) {
 	size_t n0 = 0, n1 = t->branches.size, parent_n0, left;
 	size_t *parent, *twin; /* Branches. */
@@ -386,8 +409,7 @@ static int index_remove(struct Trie *const t, size_t i) {
 		}
 	}
 	/* Merge `parent` with `twin` before deleting `parent` branch. */
-	if(twin)
-		/* fixme: There is nothing to guarantee this. */
+	if(twin) /* fixme: There is nothing to guarantee this. */
 		assert(trie_skip(*twin) < TRIE_SKIP_MAX - trie_skip(*parent)),
 		trie_skip_set(twin, trie_skip(*twin) + 1 + trie_skip(*parent));
 	memmove(parent, parent + 1,
@@ -441,7 +463,7 @@ static size_t trie_left_leaf(const struct Trie *const t, const size_t n) {
 }
 
 /** Draw a graph of `t` to `fn` in Graphviz format. */
-static void graph(const struct Trie *const t, FILE *fp) {
+static void trie_graph_fp(const struct Trie *const t, FILE *fp) {
 	size_t i, n;
 	assert(t && fp);
 	fprintf(fp, "digraph {\n"
@@ -476,60 +498,15 @@ static void graph(const struct Trie *const t, FILE *fp) {
 		"}\n");
 }
 
-
-/* These are functions declared in `Trie.h`; these represent a public
- simplified probable use case of trie as decided by whims of fantasy. */
-
-
-/** Initialises `t` with optional `a` of `a_size`.
- @return Success. @throws[realloc, ERANGE] */
-int Trie(struct Trie *const t,
-	const char *const*const a, const size_t a_size)
-	{ return t ? a && a_size ? trie_init(t, a, a_size, 0) : (trie(t), 1) : 0; }
-
-/** Returns `t` to idle. */
-void Trie_(struct Trie *const t) { if(t) trie_(t); }
-
-/** Queries whether `key` is in `t`. @return The corresponding entry for `key`,
- or null. @order \O(`key.length`) */
-const char *TrieGet(const struct Trie *const t, const char *const key)
-	{ return t && key ? trie_get(t, key) : 0; }
-
-/** Looks up the words that start with `prefix` in `t`.
- @param[low, high] If each not null, will be `[low, high]` of the match or
- null if it didn't match anything. @order \O(`prefix.length`) */
-void TriePrefix(const struct Trie *const t, const char *const prefix,
-	const char **const low, const char **const high) {
-	size_t l, h;
-	if(low)  *low  = 0;
-	if(high) *high = 0;
-	if(!t || !prefix || !trie_prefix(t, prefix, &l, &h)) return;
-	assert(l <= h && h < t->leaves.size);
-	if(low)  *low  = t->leaves.data[l];
-	if(high) *high = t->leaves.data[h];
-}
-
-/** A duplicate entry is ejected. @return Success. @throws[realloc, ERANGE]
- @order \O(`key.length`) */
-int TriePut(struct Trie *const t, const char *const key)
-	{ return t && key && trie_put(t, key, 0, 0); }
-
-/** @return Whether `key` has been removed from `t`. @order \O(`key.length`) */
-int TrieRemove(struct Trie *const t, const char *const key)
-	{ return t && key && trie_remove(t, key); }
-
 /** Graphs `t` in `Graphviz` format in the file `fn`.
  @return Success. @throws[fopen, EDOM] */
-int TrieGraph(const struct Trie *const t, const char *const fn) {
+static int trie_graph(const struct Trie *const t, const char *const fn) {
 	FILE *fp;
-	if(!t || !fn || !(fp = fopen(fn, "w"))) return 0;
-	graph(t, fp);
+	assert(t && fn);
+	if(!(fp = fopen(fn, "w"))) return 0;
+	trie_graph_fp(t, fp);
 	return fclose(fp) ? errno ? 0 : (errno = EDOM, 0) : 1;
 }
-
-#define TEST
-
-#ifdef TEST /* <!-- */
 
 int main(void) {
 	const char *const words[] = {
@@ -614,9 +591,9 @@ int main(void) {
 	const char *word, *res0, *res1;
 	int success = EXIT_FAILURE;
 
-	if(!Trie(&t, words, words_size)) goto catch;
+	if(!trie_init(&t, words, words_size)) goto catch;
 
-	TrieGraph(&t, "graph/trie0.gv");
+	trie_graph(&t, "graph/trie0.gv");
 
 	word = "lambda";
 	res0 = index_get(&t, word);
@@ -655,7 +632,7 @@ int main(void) {
 	assert(t.leaves.size == words_size);
 	for(i = 0; i < extra_size; i++)
 		if(!trie_put(&t, extra[i], &eject, 0)) goto catch;
-	TrieGraph(&t, "graph/trie1.gv");
+	trie_graph(&t, "graph/trie1.gv");
 	assert(t.leaves.size == words_size + extra_size);
 	for(i = 0; i < words_size; i++)
 		leaf = trie_get(&t, words[i]), assert(leaf && leaf == words[i]);
@@ -666,7 +643,7 @@ int main(void) {
 		const int is = trie_remove(&t, extra[i]);
 		assert(is);
 	}
-	TrieGraph(&t, "graph/trie2.gv");
+	trie_graph(&t, "graph/trie2.gv");
 	assert(t.leaves.size == words_size);
 	for(i = 0; i < words_size; i++)
 		leaf = trie_get(&t, words[i]), assert(leaf && leaf == words[i]);
@@ -681,5 +658,3 @@ finally:
 	trie_(&t);
 	return success;
 }
-
-#endif /* TEST --> */
