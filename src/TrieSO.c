@@ -1,19 +1,3 @@
-/* I initially thought to improve the lookup of a hashed of string by only storing the difference between the strings in a dynamic hash function, similar to [HAMT](Bagwell?Ideal). Taking this idea to it's end, I was thinking of was a binary (PATRICiA)[Morrison1968PATRICIA] prefix-tree data-structure. There is a good example of PATRICiA trees in [Crochemore, Lecroq, 2009 Trie], except they have the byte-order flipped.
-
-
- 
- Usually this structure is formed by interconnected nodes (or tables in old literature, something like an automaton) that gives it good insertion and deletion times. I was thinking of a data structure with lots of lookups and relatively few modifications, so I used two dynamic arrays. These are dominated by `O(n)` to insert or remove, but the upside is you have random access to all the pointers, necessarily in order and compactified?. Downside is it's limited by `O(n)` modification performance that will get you sometime.
- 
- 
- 
- It's 400 LOC on top of 200 testing, which is more than I'd ask anyone to review in detail, so I'll give you an overview.
- - An X-Macro for a dynamic array.
- - The internal nodes, or branches array. This is part of a full binary tree in semi-implicit form. Each entry represents a node, storing two items of information packed into a `size_t`: `skip` is how many bits are don't cares before we arrive at a decision bit, and `left`, how many branches are descended on the left from this node. Traversing the tree from the root, we keep track of left (`n0 + 1`) and right (`n1`) of the sub-tree rooted at `n0`.
-
- Before I had a fixed 512-byte limit on `bit`. I was going though some papers on the subject and now I use `skip`. which can expand to the limits of the computer, but only 512 bytes between levels on the tree. I assert that this holds, but really I should check and not allow it to get in an inconsistent state. ([Ziv-Lempel compression tree](Naverro2004), [Genomic data](WilliamsZobel??).) However, it gets even harder when I merge two `skip` values on delete; am I supposed to say that this entry could not be deleted because it would overflow?
-
- */
-
 #include <stdlib.h> /* EXIT malloc free qsort */
 #include <stdio.h>  /* printf */
 #include <string.h> /* memmove memcpy */
@@ -306,17 +290,17 @@ static int trie_prefix(const struct Trie *const t, const char *const prefix,
  @throws[ERANGE] Trie reached it's conservative maximum, which on machines
  where the pointer is 64-bits, is 4.5T. On 32-bits, it's 1M.
  @throws[realloc, ERANGE] */
-static int trie_add_unique(struct Trie *const t, Leaf datum) {
+static int trie_add_unique(struct Trie *const t, Leaf key) {
 	const size_t leaf_size = t->leaves.size, branch_size = leaf_size - 1;
 	size_t n0 = 0, n1 = branch_size, i = 0, left, bit = 0, bit0 = 0, bit1;
 	size_t *branch = 0;
 	const char *n0_key;
 	Leaf *leaf;
 	int cmp;
-	assert(t && datum);
+	assert(t && key);
 	/* Empty special case. */
 	if(!leaf_size) return assert(!t->branches.size),
-		(leaf = leaf_array_new(&t->leaves)) ? *leaf = datum, 1 : 0;
+		(leaf = leaf_array_new(&t->leaves)) ? *leaf = key, 1 : 0;
 	/* Redundant `size_t`, but maybe we will use it like Judy compression? */
 	assert(leaf_size == branch_size + 1);
 	/* Conservative maximally unbalanced trie. Reserve one more. */
@@ -326,14 +310,14 @@ static int trie_add_unique(struct Trie *const t, Leaf datum) {
 	/* Branch from internal node. */
 	while(branch = t->branches.data + n0, n0_key = t->leaves.data[i], n0 < n1) {
 		for(bit1 = bit + trie_skip(*branch); bit < bit1; bit++)
-			if((cmp = trie_strcmp_bit(datum, n0_key, bit)) != 0) goto insert;
+			if((cmp = trie_strcmp_bit(key, n0_key, bit)) != 0) goto insert;
 		bit0 = bit1;
 		left = trie_left(*branch) + 1; /* Leaves. */
-		if(!trie_is_bit(datum, bit++)) trie_left_inc(branch), n1 = n0++ + left;
+		if(!trie_is_bit(key, bit++)) trie_left_inc(branch), n1 = n0++ + left;
 		else n0 += left, i += left;
 	}
 	/* Branch from leaf. */
-	while((cmp = trie_strcmp_bit(datum, n0_key, bit)) == 0) bit++;
+	while((cmp = trie_strcmp_bit(key, n0_key, bit)) == 0) bit++;
 insert:
 	assert(n0 <= n1 && n1 <= t->branches.size && n0_key && i <= t->leaves.size
 		&& !n0 == !bit0);
@@ -343,7 +327,7 @@ insert:
 	/* Insert leaf. */
 	leaf = t->leaves.data + i;
 	memmove(leaf + 1, leaf, sizeof *leaf * (leaf_size - i));
-	*leaf = datum, t->leaves.size++;
+	*leaf = key, t->leaves.size++;
 	/* Insert branch. */
 	branch = t->branches.data + n0;
 	if(n0 != n1) { /* Split the skip value with the existing branch. */
@@ -658,3 +642,49 @@ finally:
 	trie_(&t);
 	return success;
 }
+
+/*
+ 
+ [trie]
+
+ Can we speed-up lookup by only storing the difference between the strings in a dynamic hash function, like [HAMT](https://infoscience.epfl.ch/record/64398)? Taking this idea to it's end, I ended up with a binary [PATRICiA][https://dl.acm.org/doi/abs/10.1145/321479.321481] prefix-tree data-structure. There is a great example of PATRICiA trees in [Crochemore, Lecroq, 2009](https://hal.archives-ouvertes.fr/hal-00470103/document), (except they have the byte-order flipped.)
+
+// Bagwell, 2001, Ideal
+// Morrison1968PATRICIA
+// Crochemore, Lecroq, 2009 Trie
+ 
+ ** Code **
+ 
+ This is a lot to review, but certain parts are more important:
+ 
+ - 9-53: A minimal `C` vector-like-type in an X-Macro.
+ - 56-122: Branches array. Each entry represents an internal node, storing two items of information that it needs to represent a tree semi-implicitly in a `size_t`.
+ - 125-129: A lexicographically sorted array of words, which are trie leaves. Branches can be seen as an index to this array.
+ - 137-199: Initialisation code for a trie.
+ - 201-251: `param_index_get`, supplied with a `key`, looks up the position in the index branches, and wrappers.
+ - 253-286: `index_prefix`, supplied with a `prefix`, returns a [`low`, `high`] for the index branches matching that prefix, and `trie_prefix` wrapper.
+ - 288-370: `trie_add_unique`, insert `key`, and `trie_put` wrapper.
+ - 132-409: `index_remove`, removes a path from the root to a leaf, and wrapper `trie_remove`.
+ - 415-493: `trie_graph` and supporting functions that make a GraphViz out of a trie.
+ - 495-644: `main` that runs some tests and outputs GraphViz files in `graph/` if you have it.
+
+ [code -- run valgrind]
+
+ ** Analysis **
+
+ [compare]
+ Random garbage words of a maximum of 64 bytes.
+
+ - Size per element is numerically unstable on low numbers. X-axis is a log scale.
+ - Usually a trie is a state machine of independently allocated nodes, but I've set it to be an array. This means it's in-order and contiguous, but dominated by `O(n)` modifications at large `n`.
+ - A trie performs okay up to a point, especially when modification is done rarely. This has almost no effect with the length of a string. 
+ - Hash table speed is `O(1)`, but that is not including the hash function and not including cache effects. In this case, that's the limiting factor. On English words with have an average of 5 letters, it's even faster, becoming faster then the trie at about 10-20 elements.
+ - The `ARRAYINIT` and `TRIEINIT` lines are very close and `TRIEINIT` is always above. This is entirely expected because they both do `qsort` and then the trie does more stuff.
+ - `ARRAYLOOK` is `bsearch`.
+
+ ** Questions **
+ 
+ Adding one-at-a-time is way less efficient than initialising it all at once. What is the run-time? How could we improving memory access and speed for initialisation?
+
+ Before I had a fixed 512-byte limit on `bit`. Now I use `skip`, which can expand to the limits of the computer, but only 512 bytes between levels on the tree. I assert that this holds, but really I should check and not allow it to get in an inconsistent state. This is a worry, for instance, [Ziv-Lempel compression tree](Naverro2004), or [Genomic data](WilliamsZobel??). What if I merge two `skip` values on delete and it overflows the 12-bits?
+ */
