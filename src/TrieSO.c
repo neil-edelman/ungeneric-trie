@@ -687,4 +687,7 @@ finally:
  Adding one-at-a-time is way less efficient than initialising it all at once. What is the run-time? How could we improving memory access and speed for initialisation?
 
  Before I had a fixed 512-byte limit on `bit`. Now I use `skip`, which can expand to the limits of the computer, but only 512 bytes between levels on the tree. I assert that this holds, but really I should check and not allow it to get in an inconsistent state. This is a worry, for instance, [Ziv-Lempel compression tree](Naverro2004), or [Genomic data](WilliamsZobel??). What if I merge two `skip` values on delete and it overflows the 12-bits?
+ 
+ Judy?
+ 
  */
