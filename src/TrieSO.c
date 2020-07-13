@@ -144,7 +144,7 @@ static void trie_(struct Trie *const t)
 
 /** Orders `a` and `b` used in <fn:trie_init>. @implements qsort bsearch */
 static int vstrcmp(const void *const a, const void *const b)
-	{ return strcmp(*(char **)a, *(char **)b); }
+	{ return strcmp(*(const char **)a, *(const char **)b); }
 
 /** Recursive function used for <fn:trie_init>. Initialise branches of `t`
  up to `bit` with `a` to `a_size` array of sorted leaves.
